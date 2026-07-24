@@ -14,9 +14,9 @@ const PORT = process.env.PORT || 3000
 // CORS — permite peticiones desde la app y la web
 app.use(cors({
   origin: [
-    'http://localhost:3001',   // portal web en desarrollo
-    'http://localhost:8081',   // app React Native en desarrollo
-    // En producción agrega tu dominio: 'https://safo.pe'
+    'http://localhost:3001',
+    'http://localhost:8081',
+    'https://safo-admin.onrender.com',
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization']
