@@ -7,16 +7,17 @@ const generarOTP = () => Math.floor(100000 + Math.random() * 900000).toString()
 // Envía SMS con OTP via Twilio
 // En desarrollo imprime el código en consola en vez de enviarlo
 const enviarSMS = async (celular, codigo) => {
-  if (process.env.NODE_ENV === 'development') {
-    console.log(`📱 OTP para ${celular}: ${codigo}`)
-    return true
+  // Siempre mostrar en logs por ahora (hasta configurar Twilio)
+  console.log(`📱 OTP para ${celular}: ${codigo}`)
+  
+  if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_ACCOUNT_SID !== 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx') {
+    const twilio = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
+    await twilio.messages.create({
+      body: `Tu código SafO es: ${codigo}. Válido por 5 minutos.`,
+      from: process.env.TWILIO_PHONE_NUMBER,
+      to: `+51${celular}`
+    })
   }
-  const twilio = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
-  await twilio.messages.create({
-    body: `Tu código SafO es: ${codigo}. Válido por 5 minutos.`,
-    from: process.env.TWILIO_PHONE_NUMBER,
-    to: `+51${celular}` // prefijo Perú
-  })
   return true
 }
 
