@@ -19,7 +19,7 @@ const enviarSMS = async (celular, codigo) => {
     })
   }
   return true
-}
+} 
 
 // POST /api/auth/solicitar-otp
 // El usuario ingresa su celular y recibe un SMS con el código

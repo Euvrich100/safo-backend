@@ -44,4 +44,34 @@ router.put ('/admin/conductores/:id/documentos',    verificarToken, soloAdmin, a
 router.post('/admin/suscripciones/confirmar',       verificarToken, soloAdmin, adminCtrl.confirmarSuscripcion)
 router.get ('/admin/viajes',                        verificarToken, soloAdmin, adminCtrl.listarViajes)
 
+
+const multer = require('multer')
+const path = require('path')
+const fs = require('fs')
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = 'uploads/'
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir)
+    cb(null, dir)
+  },
+  filename: (req, file, cb) => {
+    cb(null, `${Date.now()}-${file.originalname}`)
+  }
+})
+
+const upload = multer({ storage, limits: { fileSize: 5 * 1024 * 1024 } })
+
+router.post('/auth/registrar-conductor', upload.fields([
+  { name: 'foto_dni_frontal' },
+  { name: 'foto_dni_trasera' },
+  { name: 'foto_licencia' },
+  { name: 'foto_vehiculo' },
+  { name: 'foto_perfil' },
+]), require('../controllers/registroController').registrarConductor)
+
+router.post('/auth/registrar-pasajero', require('../controllers/registroController').registrarPasajero)
+
+
+
 module.exports = router
