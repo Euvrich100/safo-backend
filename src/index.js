@@ -63,6 +63,10 @@ app.use((err, req, res, next) => {
 // ══════════════════════════════════════════
 // INICIAR SERVIDOR
 // ══════════════════════════════════════════
+// Cancela las solicitudes que el conductor no respondió a tiempo
+const { expirarSolicitudes } = require('./controllers/viajeController')
+setInterval(expirarSolicitudes, 30 * 1000).unref()
+
 app.listen(PORT, () => {
   console.log(``)
   console.log(`  🚖  SafO API corriendo en http://localhost:${PORT}`)

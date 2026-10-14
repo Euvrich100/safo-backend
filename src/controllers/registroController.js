@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken')
 const path = require('path')
 const { query, pool } = require('../config/database')
 const { UPLOADS_DIR } = require('../config/uploads')
+const { hashClave, claveValida, CLAVE_MIN, CLAVE_MAX } = require('./cuentaController')
 
 // Borra los archivos que multer ya guardó cuando el registro se rechaza
 // (validación o duplicado) para no dejar fotos huérfanas en disco.
@@ -39,6 +40,9 @@ const registrarConductor = async (req, res) => {
     }
     if (celular.length !== 9) return rechazar(400, 'El celular debe tener 9 dígitos')
     if (dni.length !== 8) return rechazar(400, 'El DNI debe tener 8 dígitos')
+    if (!claveValida(req.body.password)) {
+      return rechazar(400, `Crea una contraseña de ${CLAVE_MIN} a ${CLAVE_MAX} caracteres`)
+    }
     if (vehiculo_anno !== null && (!Number.isInteger(vehiculo_anno) || vehiculo_anno < 1980 || vehiculo_anno > new Date().getFullYear() + 1)) {
       return rechazar(400, 'Año del vehículo inválido')
     }
@@ -71,9 +75,9 @@ const registrarConductor = async (req, res) => {
       await client.query('BEGIN')
 
       const usuario = await client.query(
-        `INSERT INTO usuarios (nombre, celular, rol, estado)
-         VALUES ($1, $2, 'conductor', 'inactivo') RETURNING id`,
-        [nombre.trim(), celular]
+        `INSERT INTO usuarios (nombre, celular, rol, estado, password_hash, password_cambiada_en)
+         VALUES ($1, $2, 'conductor', 'inactivo', $3, NOW()) RETURNING id`,
+        [nombre.trim(), celular, await hashClave(req.body.password)]
       )
 
       await client.query(
@@ -131,6 +135,9 @@ const registrarPasajero = async (req, res) => {
     if (celular.length !== 9) {
       return res.status(400).json({ error: 'El celular debe tener 9 dígitos' })
     }
+    if (!claveValida(req.body.password)) {
+      return res.status(400).json({ error: `Crea una contraseña de ${CLAVE_MIN} a ${CLAVE_MAX} caracteres` })
+    }
 
     const existe = await query('SELECT id FROM usuarios WHERE celular = $1', [celular])
     if (existe.rows.length > 0) {
@@ -142,9 +149,9 @@ const registrarPasajero = async (req, res) => {
     try {
       await client.query('BEGIN')
       const nuevoUsuario = await client.query(
-        `INSERT INTO usuarios (nombre, celular, rol, estado)
-         VALUES ($1, $2, 'pasajero', 'activo') RETURNING id`,
-        [nombre.trim(), celular]
+        `INSERT INTO usuarios (nombre, celular, rol, estado, password_hash, password_cambiada_en)
+         VALUES ($1, $2, 'pasajero', 'activo', $3, NOW()) RETURNING id`,
+        [nombre.trim(), celular, await hashClave(req.body.password)]
       )
       idUsuario = nuevoUsuario.rows[0].id
       await client.query('INSERT INTO pasajeros (usuario_id) VALUES ($1)', [idUsuario])
@@ -156,9 +163,8 @@ const registrarPasajero = async (req, res) => {
       client.release()
     }
 
-    // La cuenta nace activa y entra directo a su panel. Hasta que SafO envíe
-    // SMS reales, el código OTP no le llega al usuario, así que no se le puede
-    // exigir al registrarse.
+    // La cuenta nace activa y entra directo a su panel (el celular aún no se
+    // verifica por SMS; la contraseña protege el acceso posterior).
     const usuario = { id: idUsuario, nombre: nombre.trim(), celular, rol: 'pasajero' }
     const token = jwt.sign(
       { id: usuario.id, rol: usuario.rol },

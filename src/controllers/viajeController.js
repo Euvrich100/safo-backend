@@ -1,5 +1,29 @@
 const { query, pool } = require('../config/database')
 
+// Minutos que tiene el conductor para responder una solicitud. Si no responde,
+// se cancela sola y se devuelve la garantía al pasajero (si no, ambos quedarían
+// bloqueados para siempre). El conductor que no responde queda NO disponible:
+// debe volver a conectarse, para no seguir recibiendo pedidos si dejó el celular.
+const SOLICITUD_TIMEOUT_MIN = Math.max(1, parseInt(process.env.SOLICITUD_TIMEOUT_MIN, 10) || 3)
+
+const expirarSolicitudes = async () => {
+  try {
+    await query(
+      `WITH vencidos AS (
+         UPDATE viajes SET estado = 'cancelado_conductor', cancelado_en = NOW(),
+                cancelacion_motivo = 'Sin respuesta del conductor', actualizado_en = NOW()
+         WHERE estado = 'solicitado'
+           AND solicitado_en < NOW() - make_interval(mins => ${SOLICITUD_TIMEOUT_MIN})
+         RETURNING id
+       )
+       UPDATE pagos_viaje SET estado = 'devuelto', actualizado_en = NOW()
+       WHERE viaje_id IN (SELECT id FROM vencidos)`
+    )
+  } catch (error) {
+    console.error('Error expirarSolicitudes:', error.message)
+  }
+}
+
 // GET /api/viajes/conductores-disponibles
 // El pasajero ve los conductores activos cerca de su ubicación
 const conductoresDisponibles = async (req, res) => {
@@ -95,6 +119,7 @@ const solicitarViaje = async (req, res) => {
     }
     const pasajero_id = pasajero.rows[0].id
 
+    await expirarSolicitudes()
     const enCurso = await query(
       'SELECT 1 FROM viajes WHERE pasajero_id = $1 AND estado = ANY($2) LIMIT 1',
       [pasajero_id, ESTADOS_ACTIVOS]
@@ -167,7 +192,9 @@ const solicitarViaje = async (req, res) => {
 // terminar uno sin calificar, ese viaje para pedir la calificación.
 const SELECT_VIAJE_PASAJERO = `
   SELECT v.id, v.estado, v.direccion_origen, v.direccion_destino,
-         v.lat_origen, v.lng_origen, v.solicitado_en, v.aceptado_en, v.completado_en,
+         v.lat_origen, v.lng_origen, v.lat_destino, v.lng_destino,
+         v.solicitado_en, v.aceptado_en, v.completado_en, v.cancelacion_motivo,
+         GREATEST(0, EXTRACT(EPOCH FROM (v.solicitado_en + make_interval(mins => ${SOLICITUD_TIMEOUT_MIN}) - NOW())))::int AS segundos_restantes,
          u.nombre AS conductor_nombre,
          CASE WHEN v.estado <> 'solicitado' THEN u.celular END AS conductor_celular,
          c.placa, c.vehiculo_marca, c.vehiculo_modelo, c.vehiculo_color, c.vehiculo_anno,
@@ -182,6 +209,7 @@ const SELECT_VIAJE_PASAJERO = `
 
 const miViaje = async (req, res) => {
   try {
+    await expirarSolicitudes()
     const activo = await query(
       `${SELECT_VIAJE_PASAJERO} AND v.estado = ANY($2)
        ORDER BY v.solicitado_en DESC LIMIT 1`,
@@ -220,6 +248,7 @@ const misViajes = async (req, res) => {
 const aceptarViaje = async (req, res) => {
   try {
     const { id } = req.params
+    await expirarSolicitudes()
 
     const conductor = await query(
       'SELECT id FROM conductores WHERE usuario_id = $1',
@@ -440,7 +469,98 @@ const calificarViaje = async (req, res) => {
   }
 }
 
+// GET /api/conductores/viaje-activo
+// Solicitud entrante o viaje en curso del conductor, con los datos del pasajero
+const viajeActivoConductor = async (req, res) => {
+  try {
+    await expirarSolicitudes()
+    const r = await query(
+      `SELECT v.id, v.estado, v.direccion_origen, v.direccion_destino,
+              v.lat_origen, v.lng_origen, v.lat_destino, v.lng_destino, v.solicitado_en,
+              GREATEST(0, EXTRACT(EPOCH FROM (v.solicitado_en + make_interval(mins => ${SOLICITUD_TIMEOUT_MIN}) - NOW())))::int AS segundos_restantes,
+              up.nombre AS pasajero_nombre,
+              CASE WHEN v.estado <> 'solicitado' THEN up.celular END AS pasajero_celular,
+              pv.metodo_pago, pv.estado AS pago_estado, pv.monto_total, pv.referencia_pago
+       FROM viajes v
+       JOIN conductores c ON c.id = v.conductor_id
+       JOIN pasajeros p   ON p.id = v.pasajero_id
+       JOIN usuarios up   ON up.id = p.usuario_id
+       LEFT JOIN pagos_viaje pv ON pv.viaje_id = v.id
+       WHERE c.usuario_id = $1 AND v.estado = ANY($2)
+       ORDER BY v.solicitado_en DESC LIMIT 1`,
+      [req.usuario.id, ESTADOS_ACTIVOS]
+    )
+    res.json({ viaje: r.rows[0] || null })
+  } catch (error) {
+    console.error('Error viajeActivoConductor:', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
+// PUT /api/viajes/:id/rechazar
+// El conductor rechaza la solicitud (o cancela antes de recoger): se devuelve
+// la garantía completa al pasajero y el conductor queda libre.
+const rechazarViaje = async (req, res) => {
+  try {
+    const { id } = req.params
+    const conductor = await query('SELECT id FROM conductores WHERE usuario_id = $1', [req.usuario.id])
+    if (conductor.rows.length === 0) return res.status(404).json({ error: 'Perfil de conductor no encontrado' })
+
+    const r = await query(
+      `UPDATE viajes SET estado = 'cancelado_conductor', cancelado_en = NOW(),
+              cancelacion_motivo = $3, actualizado_en = NOW(),
+              conductor_fue_despachado = (estado <> 'solicitado')
+       WHERE id = $1 AND conductor_id = $2 AND estado IN ('solicitado','aceptado','en_camino')
+       RETURNING id`,
+      [id, conductor.rows[0].id, req.body?.motivo || 'Rechazado por el conductor']
+    )
+    if (r.rowCount === 0) {
+      return res.status(409).json({ error: 'Este viaje ya no se puede rechazar' })
+    }
+
+    await query(
+      "UPDATE pagos_viaje SET estado = 'devuelto', actualizado_en = NOW() WHERE viaje_id = $1",
+      [id]
+    )
+    await query('UPDATE conductores SET disponible = TRUE WHERE id = $1', [conductor.rows[0].id])
+
+    res.json({ mensaje: 'Solicitud rechazada. Se devolvió la garantía al pasajero.', estado: 'cancelado_conductor' })
+  } catch (error) {
+    if (error.code === '22P02') return res.status(404).json({ error: 'Viaje no encontrado' })
+    console.error('Error rechazarViaje:', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
+// PUT /api/viajes/:id/iniciar
+// El conductor recogió al pasajero: el viaje pasa a "en curso"
+const iniciarViaje = async (req, res) => {
+  try {
+    const { id } = req.params
+    const conductor = await query('SELECT id FROM conductores WHERE usuario_id = $1', [req.usuario.id])
+    if (conductor.rows.length === 0) return res.status(404).json({ error: 'Perfil de conductor no encontrado' })
+
+    const r = await query(
+      `UPDATE viajes SET estado = 'recogido', recogido_en = NOW(), actualizado_en = NOW()
+       WHERE id = $1 AND conductor_id = $2 AND estado IN ('aceptado','en_camino')`,
+      [id, conductor.rows[0].id]
+    )
+    if (r.rowCount === 0) {
+      return res.status(409).json({ error: 'Este viaje no está esperando al pasajero' })
+    }
+    res.json({ mensaje: 'Viaje iniciado. ¡Buen camino!', estado: 'recogido' })
+  } catch (error) {
+    if (error.code === '22P02') return res.status(404).json({ error: 'Viaje no encontrado' })
+    console.error('Error iniciarViaje:', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
 module.exports = {
+  expirarSolicitudes,
+  viajeActivoConductor,
+  rechazarViaje,
+  iniciarViaje,
   conductoresDisponibles,
   solicitarViaje,
   miViaje,

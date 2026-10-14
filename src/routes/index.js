@@ -8,6 +8,7 @@ const conductorCtrl = require('../controllers/conductorController')
 const viajeCtrl     = require('../controllers/viajeController')
 const adminCtrl     = require('../controllers/adminController')
 const registroCtrl  = require('../controllers/registroController')
+const cuentaCtrl    = require('../controllers/cuentaController')
 const { documentosConductor } = require('../middlewares/upload')
 
 // ══════════════════════════════════════════
@@ -16,6 +17,7 @@ const { documentosConductor } = require('../middlewares/upload')
 router.post('/auth/registrar',      authCtrl.registrar)
 router.post('/auth/solicitar-otp',  authCtrl.solicitarOTP)
 router.post('/auth/verificar-otp',  authCtrl.verificarOTP)
+router.post('/auth/login',          cuentaCtrl.login)
 router.post('/auth/google',                    authCtrl.loginGoogle)
 router.post('/auth/google/completar-pasajero', authCtrl.completarGoogle)
 
@@ -28,6 +30,13 @@ router.put ('/conductores/disponibilidad',  verificarToken, soloConductor, condu
 router.put ('/conductores/ubicacion',       verificarToken, soloConductor, conductorCtrl.actualizarUbicacion)
 router.get ('/conductores/suscripciones',   verificarToken, soloConductor, conductorCtrl.obtenerSuscripciones)
 router.get ('/conductores/viajes',          verificarToken, soloConductor, conductorCtrl.obtenerViajes)
+router.get ('/conductores/viaje-activo',    verificarToken, soloConductor, viajeCtrl.viajeActivoConductor)
+
+// ══════════════════════════════════════════
+// CUENTA — cualquier usuario con sesión
+// ══════════════════════════════════════════
+router.put ('/cuenta/clave',                verificarToken, cuentaCtrl.cambiarClave)
+router.put ('/cuenta/perfil',               verificarToken, cuentaCtrl.actualizarPerfilCuenta)
 
 // ══════════════════════════════════════════
 // VIAJES — pasajero solicita, conductor atiende
@@ -37,6 +46,8 @@ router.post('/viajes/solicitar',               verificarToken, soloPasajero,  vi
 router.get ('/viajes/mi-viaje',                  verificarToken, soloPasajero,  viajeCtrl.miViaje)
 router.get ('/viajes/mis-viajes',                 verificarToken, soloPasajero,  viajeCtrl.misViajes)
 router.put ('/viajes/:id/aceptar',             verificarToken, soloConductor, viajeCtrl.aceptarViaje)
+router.put ('/viajes/:id/rechazar',            verificarToken, soloConductor, viajeCtrl.rechazarViaje)
+router.put ('/viajes/:id/iniciar',             verificarToken, soloConductor, viajeCtrl.iniciarViaje)
 router.put ('/viajes/:id/completar',           verificarToken, soloConductor, viajeCtrl.completarViaje)
 router.put ('/viajes/:id/cancelar',            verificarToken, soloPasajero,  viajeCtrl.cancelarViaje)
 router.post('/viajes/:id/calificar',           verificarToken, soloPasajero,  viajeCtrl.calificarViaje)
@@ -52,6 +63,7 @@ router.post('/admin/suscripciones/confirmar',       verificarToken, soloAdmin, a
 router.get ('/admin/viajes',                        verificarToken, soloAdmin, adminCtrl.listarViajes)
 router.get ('/admin/pasajeros',                     verificarToken, soloAdmin, adminCtrl.listarPasajeros)
 router.put ('/admin/usuarios/:id/estado',           verificarToken, soloAdmin, adminCtrl.cambiarEstadoUsuario)
+router.post('/admin/usuarios/:id/restablecer-clave', verificarToken, soloAdmin, cuentaCtrl.restablecerClave)
 router.get ('/admin/documentos/:archivo',           verificarToken, soloAdmin, adminCtrl.verDocumento)
 
 

@@ -108,7 +108,7 @@ const detalleConductor = async (req, res) => {
   try {
     const resultado = await query(
       `SELECT u.nombre, u.celular, u.estado as estado_usuario, u.creado_en as registrado_en,
-              c.id, c.dni, c.fecha_nacimiento, c.direccion,
+              u.id as usuario_id, c.id, c.dni, c.fecha_nacimiento, c.direccion,
               c.licencia_numero, c.licencia_categoria, c.placa,
               c.vehiculo_marca, c.vehiculo_modelo, c.vehiculo_color, c.vehiculo_anno,
               c.dni_foto_frontal_url, c.dni_foto_trasera_url, c.licencia_foto_url,
