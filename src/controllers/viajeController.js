@@ -1,4 +1,4 @@
-const { query } = require('../config/database')
+const { query, pool } = require('../config/database')
 
 // GET /api/viajes/conductores-disponibles
 // El pasajero ve los conductores activos cerca de su ubicación
@@ -22,7 +22,7 @@ const conductoresDisponibles = async (req, res) => {
     const resultado = await query(
       `SELECT * FROM (
          SELECT c.id, u.nombre, c.placa, c.vehiculo_marca, c.vehiculo_modelo,
-                c.vehiculo_color, c.calificacion_prom, c.total_viajes,
+                c.vehiculo_color, c.vehiculo_anno, c.calificacion_prom, c.total_viajes,
                 c.lat_actual, c.lng_actual,
                 ROUND((6371 * acos(LEAST(1, GREATEST(-1,
                   cos(radians($1::float)) * cos(radians(c.lat_actual)) *
@@ -52,31 +52,63 @@ const conductoresDisponibles = async (req, res) => {
 }
 
 // POST /api/viajes/solicitar
-// El pasajero solicita un taxi (ya pagó S/ 1.50 previamente)
+// El pasajero solicita un taxi y deja la garantía de S/ 1.50 (Yape o Plin)
+const METODOS_PAGO = ['yape', 'plin']
+const ESTADOS_ACTIVOS = ['solicitado', 'aceptado', 'en_camino', 'recogido']
+const numeroOnull = (v) => (v === undefined || v === null || v === '' ? null : Number(v))
+
 const solicitarViaje = async (req, res) => {
+  const {
+    conductor_id,
+    lat_origen, lng_origen, direccion_origen,
+    lat_destino, lng_destino, direccion_destino,
+    referencia_pago
+  } = req.body
+  const metodo_pago = String(req.body.metodo_pago || '').toLowerCase()
+
+  // Todo se valida ANTES de reservar al conductor: antes un método de pago
+  // inválido dejaba al conductor reservado y sin viaje.
+  if (!conductor_id) {
+    return res.status(400).json({ error: 'Elige un conductor' })
+  }
+  if (!METODOS_PAGO.includes(metodo_pago)) {
+    return res.status(400).json({ error: 'Elige Yape o Plin para la garantía' })
+  }
+  const ref = String(referencia_pago || '').trim()
+  if (ref.length < 4 || ref.length > 100) {
+    return res.status(400).json({ error: 'Ingresa el código de operación de tu pago' })
+  }
+  const latO = numeroOnull(lat_origen), lngO = numeroOnull(lng_origen)
+  if (!Number.isFinite(latO) || !Number.isFinite(lngO)) {
+    return res.status(400).json({ error: 'Ubicación de recojo inválida' })
+  }
+  const latD = numeroOnull(lat_destino), lngD = numeroOnull(lng_destino)
+  if ((latD !== null && !Number.isFinite(latD)) || (lngD !== null && !Number.isFinite(lngD))) {
+    return res.status(400).json({ error: 'Ubicación de destino inválida' })
+  }
+
+  let client
   try {
-    const {
-      conductor_id,
-      lat_origen, lng_origen, direccion_origen,
-      lat_destino, lng_destino, direccion_destino,
-      referencia_pago, metodo_pago
-    } = req.body
-
-    // Obtener perfil del pasajero
-    const pasajero = await query(
-      'SELECT id FROM pasajeros WHERE usuario_id = $1',
-      [req.usuario.id]
-    )
-
+    const pasajero = await query('SELECT id FROM pasajeros WHERE usuario_id = $1', [req.usuario.id])
     if (pasajero.rows.length === 0) {
       return res.status(404).json({ error: 'Perfil de pasajero no encontrado' })
     }
-
     const pasajero_id = pasajero.rows[0].id
+
+    const enCurso = await query(
+      'SELECT 1 FROM viajes WHERE pasajero_id = $1 AND estado = ANY($2) LIMIT 1',
+      [pasajero_id, ESTADOS_ACTIVOS]
+    )
+    if (enCurso.rows.length > 0) {
+      return res.status(409).json({ error: 'Ya tienes un viaje en curso' })
+    }
+
+    client = await pool.connect()
+    await client.query('BEGIN')
 
     // Reservar al conductor de forma atómica: el UPDATE solo prospera si sigue
     // disponible, así dos pasajeros no pueden pedir el mismo taxi a la vez.
-    const conductor = await query(
+    const conductor = await client.query(
       `UPDATE conductores c SET disponible = FALSE
        FROM usuarios u
        WHERE c.id = $1 AND u.id = c.usuario_id
@@ -85,13 +117,12 @@ const solicitarViaje = async (req, res) => {
        RETURNING c.lat_actual, c.lng_actual`,
       [conductor_id]
     )
-
     if (conductor.rows.length === 0) {
+      await client.query('ROLLBACK')
       return res.status(409).json({ error: 'El conductor ya no está disponible' })
     }
 
-    // Crear el viaje
-    const viaje = await query(
+    const viaje = await client.query(
       `INSERT INTO viajes (
         conductor_id, pasajero_id, estado,
         lat_origen, lng_origen, direccion_origen,
@@ -101,20 +132,21 @@ const solicitarViaje = async (req, res) => {
        RETURNING id`,
       [
         conductor_id, pasajero_id,
-        lat_origen, lng_origen, direccion_origen,
-        lat_destino, lng_destino, direccion_destino,
+        latO, lngO, direccion_origen || null,
+        latD, lngD, direccion_destino || null,
         conductor.rows[0].lat_actual, conductor.rows[0].lng_actual
       ]
     )
-
     const viaje_id = viaje.rows[0].id
 
-    // Registrar el pago de garantía S/ 1.50 como "retenido"
-    await query(
+    // Garantía S/ 1.50 "retenida" hasta que el viaje termine o se cancele
+    await client.query(
       `INSERT INTO pagos_viaje (viaje_id, monto_total, metodo_pago, tipo, estado, referencia_pago)
        VALUES ($1, 1.50, $2, 'garantia', 'retenido', $3)`,
-      [viaje_id, metodo_pago, referencia_pago]
+      [viaje_id, metodo_pago, ref]
     )
+
+    await client.query('COMMIT')
 
     res.status(201).json({
       mensaje: 'Taxi solicitado. Esperando confirmación del conductor.',
@@ -122,7 +154,63 @@ const solicitarViaje = async (req, res) => {
       estado: 'solicitado'
     })
   } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {})
     console.error('Error solicitarViaje:', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  } finally {
+    if (client) client.release()
+  }
+}
+
+// GET /api/viajes/mi-viaje
+// Viaje en curso del pasajero (con los datos del conductor) y, si acaba de
+// terminar uno sin calificar, ese viaje para pedir la calificación.
+const SELECT_VIAJE_PASAJERO = `
+  SELECT v.id, v.estado, v.direccion_origen, v.direccion_destino,
+         v.lat_origen, v.lng_origen, v.solicitado_en, v.aceptado_en, v.completado_en,
+         u.nombre AS conductor_nombre,
+         CASE WHEN v.estado <> 'solicitado' THEN u.celular END AS conductor_celular,
+         c.placa, c.vehiculo_marca, c.vehiculo_modelo, c.vehiculo_color, c.vehiculo_anno,
+         c.calificacion_prom, c.total_viajes, c.lat_actual, c.lng_actual,
+         pv.metodo_pago, pv.estado AS pago_estado, pv.monto_total, pv.referencia_pago
+  FROM viajes v
+  JOIN pasajeros p    ON p.id = v.pasajero_id
+  JOIN conductores c  ON c.id = v.conductor_id
+  JOIN usuarios u     ON u.id = c.usuario_id
+  LEFT JOIN pagos_viaje pv ON pv.viaje_id = v.id
+  WHERE p.usuario_id = $1`
+
+const miViaje = async (req, res) => {
+  try {
+    const activo = await query(
+      `${SELECT_VIAJE_PASAJERO} AND v.estado = ANY($2)
+       ORDER BY v.solicitado_en DESC LIMIT 1`,
+      [req.usuario.id, ESTADOS_ACTIVOS]
+    )
+    const porCalificar = await query(
+      `${SELECT_VIAJE_PASAJERO} AND v.estado = 'completado'
+         AND NOT EXISTS (SELECT 1 FROM calificaciones k WHERE k.viaje_id = v.id)
+         AND v.completado_en > NOW() - INTERVAL '1 day'
+       ORDER BY v.completado_en DESC LIMIT 1`,
+      [req.usuario.id]
+    )
+    res.json({ activo: activo.rows[0] || null, por_calificar: porCalificar.rows[0] || null })
+  } catch (error) {
+    console.error('Error miViaje:', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
+// GET /api/viajes/mis-viajes — últimos 20 viajes del pasajero
+const misViajes = async (req, res) => {
+  try {
+    const r = await query(
+      `${SELECT_VIAJE_PASAJERO} ORDER BY v.solicitado_en DESC LIMIT 20`,
+      [req.usuario.id]
+    )
+    res.json(r.rows)
+  } catch (error) {
+    console.error('Error misViajes:', error)
     res.status(500).json({ error: 'Error interno del servidor' })
   }
 }
@@ -355,6 +443,8 @@ const calificarViaje = async (req, res) => {
 module.exports = {
   conductoresDisponibles,
   solicitarViaje,
+  miViaje,
+  misViajes,
   aceptarViaje,
   completarViaje,
   cancelarViaje,

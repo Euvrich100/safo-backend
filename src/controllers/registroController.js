@@ -1,4 +1,5 @@
 const fs = require('fs')
+const jwt = require('jsonwebtoken')
 const path = require('path')
 const { query, pool } = require('../config/database')
 const { UPLOADS_DIR } = require('../config/uploads')
@@ -136,6 +137,7 @@ const registrarPasajero = async (req, res) => {
       return res.status(409).json({ error: 'Este número ya está registrado' })
     }
 
+    let idUsuario
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
@@ -144,7 +146,8 @@ const registrarPasajero = async (req, res) => {
          VALUES ($1, $2, 'pasajero', 'activo') RETURNING id`,
         [nombre.trim(), celular]
       )
-      await client.query('INSERT INTO pasajeros (usuario_id) VALUES ($1)', [nuevoUsuario.rows[0].id])
+      idUsuario = nuevoUsuario.rows[0].id
+      await client.query('INSERT INTO pasajeros (usuario_id) VALUES ($1)', [idUsuario])
       await client.query('COMMIT')
     } catch (err) {
       await client.query('ROLLBACK')
@@ -153,9 +156,21 @@ const registrarPasajero = async (req, res) => {
       client.release()
     }
 
+    // La cuenta nace activa y entra directo a su panel. Hasta que SafO envíe
+    // SMS reales, el código OTP no le llega al usuario, así que no se le puede
+    // exigir al registrarse.
+    const usuario = { id: idUsuario, nombre: nombre.trim(), celular, rol: 'pasajero' }
+    const token = jwt.sign(
+      { id: usuario.id, rol: usuario.rol },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN }
+    )
+
     res.status(201).json({
       mensaje: '¡Registro exitoso! Ya puedes pedir tu taxi seguro.',
-      estado: 'activo'
+      estado: 'activo',
+      token,
+      usuario
     })
   } catch (error) {
     console.error('Error registrarPasajero:', error)

@@ -34,6 +34,8 @@ router.get ('/conductores/viajes',          verificarToken, soloConductor, condu
 // ══════════════════════════════════════════
 router.get ('/viajes/conductores-disponibles', verificarToken, viajeCtrl.conductoresDisponibles)
 router.post('/viajes/solicitar',               verificarToken, soloPasajero,  viajeCtrl.solicitarViaje)
+router.get ('/viajes/mi-viaje',                  verificarToken, soloPasajero,  viajeCtrl.miViaje)
+router.get ('/viajes/mis-viajes',                 verificarToken, soloPasajero,  viajeCtrl.misViajes)
 router.put ('/viajes/:id/aceptar',             verificarToken, soloConductor, viajeCtrl.aceptarViaje)
 router.put ('/viajes/:id/completar',           verificarToken, soloConductor, viajeCtrl.completarViaje)
 router.put ('/viajes/:id/cancelar',            verificarToken, soloPasajero,  viajeCtrl.cancelarViaje)
