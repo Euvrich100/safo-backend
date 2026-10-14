@@ -1,8 +1,16 @@
 const jwt = require('jsonwebtoken')
+const { OAuth2Client } = require('google-auth-library')
 const { query } = require('../config/database')
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID)
 
 // Genera un código OTP de 6 dígitos
 const generarOTP = () => Math.floor(100000 + Math.random() * 900000).toString()
+
+// Límite de intentos de verificación por celular, para evitar fuerza bruta
+// sobre el código de 6 dígitos. Se resetea al pedir un OTP nuevo.
+const MAX_INTENTOS_OTP = 5
+const intentosOTP = new Map() // celular -> intentos restantes
 
 // Envía SMS con OTP via Twilio
 // En desarrollo imprime el código en consola en vez de enviarlo
@@ -50,6 +58,7 @@ const solicitarOTP = async (req, res) => {
     )
 
     await enviarSMS(celular, codigo)
+    intentosOTP.set(celular, MAX_INTENTOS_OTP)
 
     res.json({ mensaje: 'Código enviado al celular', expira_en: expira })
   } catch (error) {
@@ -76,8 +85,17 @@ const verificarOTP = async (req, res) => {
 
     const usuario = resultado.rows[0]
 
+    // Verificar límite de intentos (evita fuerza bruta sobre el código de 6 dígitos)
+    const intentosRestantes = intentosOTP.get(celular)
+    if (intentosRestantes !== undefined && intentosRestantes <= 0) {
+      return res.status(429).json({ error: 'Demasiados intentos fallidos. Solicita un código nuevo.' })
+    }
+
     // Verificar código
     if (usuario.otp_codigo !== codigo) {
+      if (intentosRestantes !== undefined) {
+        intentosOTP.set(celular, intentosRestantes - 1)
+      }
       return res.status(401).json({ error: 'Código incorrecto' })
     }
 
@@ -91,11 +109,27 @@ const verificarOTP = async (req, res) => {
       return res.status(403).json({ error: 'Cuenta suspendida. Contacta al administrador.' })
     }
 
-    // Limpiar OTP usado
+    // Un conductor solo entra cuando el administrador aprobó su solicitud
+    if (usuario.rol === 'conductor') {
+      const doc = await query(
+        'SELECT estado_doc, rechazo_motivo FROM conductores WHERE usuario_id = $1',
+        [usuario.id]
+      )
+      const d = doc.rows[0]
+      if (!d || d.estado_doc === 'pendiente') {
+        return res.status(403).json({ error: 'Tu solicitud está en revisión. Te avisaremos cuando sea aprobada.' })
+      }
+      if (d.estado_doc === 'rechazado') {
+        return res.status(403).json({ error: `Tu solicitud fue rechazada${d.rechazo_motivo ? ': ' + d.rechazo_motivo : ''}. Contacta al administrador.` })
+      }
+    }
+
+    // Limpiar OTP usado y resetear contador de intentos
     await query(
       'UPDATE usuarios SET otp_codigo = NULL, otp_expira_en = NULL WHERE id = $1',
       [usuario.id]
     )
+    intentosOTP.delete(celular)
 
     // Generar JWT
     const token = jwt.sign(
@@ -175,4 +209,125 @@ const registrar = async (req, res) => {
   }
 }
 
-module.exports = { solicitarOTP, verificarOTP, registrar }
+// Verifica un idToken de Google y devuelve su payload, o null si es inválido.
+const verificarTokenGoogle = async (credential) => {
+  if (!process.env.GOOGLE_CLIENT_ID || !credential) return null
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    })
+    const payload = ticket.getPayload()
+    return payload?.email_verified ? payload : null
+  } catch (err) {
+    return null
+  }
+}
+
+const firmarToken = (usuario) => jwt.sign(
+  { id: usuario.id, rol: usuario.rol },
+  process.env.JWT_SECRET,
+  { expiresIn: process.env.JWT_EXPIRES_IN }
+)
+
+// POST /api/auth/google
+// Login con Google para administradores (ya deben existir, asignados por
+// otro admin vía SQL — nadie se auto-otorga rol admin) y pasajeros.
+// Si el correo no está registrado y viene de la app de pasajeros, no crea
+// la cuenta todavía: responde `nuevo: true` para que el cliente pida el
+// celular y complete el registro en /auth/google/completar-pasajero.
+const loginGoogle = async (req, res) => {
+  try {
+    const { credential } = req.body
+    if (!credential) {
+      return res.status(400).json({ error: 'Falta el token de Google' })
+    }
+
+    const payload = await verificarTokenGoogle(credential)
+    if (!payload) {
+      return res.status(401).json({ error: 'Token de Google inválido o expirado' })
+    }
+
+    const resultado = await query(
+      `SELECT id, nombre, celular, rol, estado, google_id
+       FROM usuarios WHERE email = $1 OR google_id = $2`,
+      [payload.email, payload.sub]
+    )
+
+    if (resultado.rows.length === 0) {
+      return res.json({ nuevo: true, nombre: payload.name || '', email: payload.email })
+    }
+
+    const usuario = resultado.rows[0]
+
+    if (usuario.rol !== 'admin' && usuario.rol !== 'pasajero') {
+      return res.status(403).json({ error: 'Esta cuenta no puede entrar con Google. Usa tu celular para iniciar sesión.' })
+    }
+
+    if (usuario.estado === 'suspendido') {
+      return res.status(403).json({ error: 'Cuenta suspendida. Contacta al administrador.' })
+    }
+
+    // Vincular el google_id la primera vez que inicia sesión así
+    if (!usuario.google_id) {
+      await query('UPDATE usuarios SET google_id = $1 WHERE id = $2', [payload.sub, usuario.id])
+    }
+
+    res.json({
+      token: firmarToken(usuario),
+      usuario: {
+        id: usuario.id,
+        nombre: usuario.nombre,
+        celular: usuario.celular,
+        rol: usuario.rol
+      }
+    })
+  } catch (error) {
+    console.error('Error loginGoogle:', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
+// POST /api/auth/google/completar-pasajero
+// Segundo paso cuando /auth/google respondió `nuevo: true`: crea la cuenta
+// de pasajero con el celular que acaba de ingresar. No hace falta OTP —
+// Google ya verificó el correo, así que entra directo sin esperar el SMS.
+const completarGoogle = async (req, res) => {
+  try {
+    const { credential, celular } = req.body
+    if (!celular || celular.length < 9) {
+      return res.status(400).json({ error: 'Número de celular inválido' })
+    }
+
+    const payload = await verificarTokenGoogle(credential)
+    if (!payload) {
+      return res.status(401).json({ error: 'Token de Google inválido o expirado' })
+    }
+
+    const existeEmail = await query('SELECT id FROM usuarios WHERE email = $1 OR google_id = $2', [payload.email, payload.sub])
+    if (existeEmail.rows.length > 0) {
+      return res.status(409).json({ error: 'Esta cuenta de Google ya está registrada. Intenta iniciar sesión de nuevo.' })
+    }
+
+    const existeCelular = await query('SELECT id FROM usuarios WHERE celular = $1', [celular])
+    if (existeCelular.rows.length > 0) {
+      return res.status(409).json({ error: 'Ese número de celular ya está registrado. Inicia sesión con tu celular.' })
+    }
+
+    const nuevoUsuario = await query(
+      `INSERT INTO usuarios (nombre, celular, rol, estado, email, google_id)
+       VALUES ($1, $2, 'pasajero', 'activo', $3, $4) RETURNING id, nombre, celular, rol`,
+      [payload.name || 'Pasajero SafO', celular, payload.email, payload.sub]
+    )
+
+    const usuario = nuevoUsuario.rows[0]
+    await query('INSERT INTO pasajeros (usuario_id) VALUES ($1)', [usuario.id])
+
+    res.status(201).json({ token: firmarToken(usuario), usuario })
+  } catch (error) {
+    console.error('Error completarGoogle:', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
+module.exports = { solicitarOTP, verificarOTP, registrar, loginGoogle, completarGoogle }

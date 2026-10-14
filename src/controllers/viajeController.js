@@ -10,34 +10,38 @@ const conductoresDisponibles = async (req, res) => {
       return res.status(400).json({ error: 'Ubicación requerida' })
     }
 
-    // Fórmula Haversine simplificada para filtrar por radio en PostgreSQL
+    const latN = parseFloat(lat), lngN = parseFloat(lng)
+    const radio = Math.min(Math.max(parseFloat(radio_km) || 5, 0.1), 50)
+    if (!Number.isFinite(latN) || !Number.isFinite(lngN)) {
+      return res.status(400).json({ error: 'Ubicación inválida' })
+    }
+
+    // Haversine en una subconsulta: PostgreSQL no permite HAVING sin GROUP BY
+    // ni usar el alias de SELECT dentro de WHERE. LEAST(1, ...) evita que el
+    // acos reciba 1.0000000002 por redondeo y devuelva NaN.
     const resultado = await query(
-      `SELECT c.id, u.nombre, c.placa, c.vehiculo_marca, c.vehiculo_modelo,
-              c.vehiculo_color, c.calificacion_prom, c.total_viajes,
-              c.lat_actual, c.lng_actual,
-              -- Distancia en km
-              ROUND(
-                (6371 * acos(
-                  cos(radians($1)) * cos(radians(c.lat_actual)) *
-                  cos(radians(c.lng_actual) - radians($2)) +
-                  sin(radians($1)) * sin(radians(c.lat_actual))
-                ))::numeric, 2
-              ) AS distancia_km
-       FROM conductores c
-       JOIN usuarios u ON u.id = c.usuario_id
-       WHERE c.disponible = TRUE
-         AND c.estado_doc = 'aprobado'
-         AND u.estado = 'activo'
-         AND c.suscripcion_vence >= CURRENT_DATE
-         AND c.lat_actual IS NOT NULL
-       HAVING (6371 * acos(
-                cos(radians($1)) * cos(radians(c.lat_actual)) *
-                cos(radians(c.lng_actual) - radians($2)) +
-                sin(radians($1)) * sin(radians(c.lat_actual))
-              )) <= $3
+      `SELECT * FROM (
+         SELECT c.id, u.nombre, c.placa, c.vehiculo_marca, c.vehiculo_modelo,
+                c.vehiculo_color, c.calificacion_prom, c.total_viajes,
+                c.lat_actual, c.lng_actual,
+                ROUND((6371 * acos(LEAST(1, GREATEST(-1,
+                  cos(radians($1::float)) * cos(radians(c.lat_actual)) *
+                  cos(radians(c.lng_actual) - radians($2::float)) +
+                  sin(radians($1::float)) * sin(radians(c.lat_actual))
+                ))))::numeric, 2) AS distancia_km
+         FROM conductores c
+         JOIN usuarios u ON u.id = c.usuario_id
+         WHERE c.disponible = TRUE
+           AND c.estado_doc = 'aprobado'
+           AND u.estado = 'activo'
+           AND c.suscripcion_vence >= CURRENT_DATE
+           AND c.lat_actual IS NOT NULL
+           AND c.lng_actual IS NOT NULL
+       ) cercanos
+       WHERE distancia_km <= $3::float
        ORDER BY distancia_km ASC
        LIMIT 20`,
-      [lat, lng, radio_km]
+      [latN, lngN, radio]
     )
 
     res.json(resultado.rows)
@@ -70,12 +74,15 @@ const solicitarViaje = async (req, res) => {
 
     const pasajero_id = pasajero.rows[0].id
 
-    // Verificar que el conductor esté disponible
+    // Reservar al conductor de forma atómica: el UPDATE solo prospera si sigue
+    // disponible, así dos pasajeros no pueden pedir el mismo taxi a la vez.
     const conductor = await query(
-      `SELECT c.id, c.lat_actual, c.lng_actual
-       FROM conductores c
-       JOIN usuarios u ON u.id = c.usuario_id
-       WHERE c.id = $1 AND c.disponible = TRUE AND u.estado = 'activo'`,
+      `UPDATE conductores c SET disponible = FALSE
+       FROM usuarios u
+       WHERE c.id = $1 AND u.id = c.usuario_id
+         AND c.disponible = TRUE AND u.estado = 'activo'
+         AND c.estado_doc = 'aprobado' AND c.suscripcion_vence >= CURRENT_DATE
+       RETURNING c.lat_actual, c.lng_actual`,
       [conductor_id]
     )
 
@@ -109,12 +116,6 @@ const solicitarViaje = async (req, res) => {
       [viaje_id, metodo_pago, referencia_pago]
     )
 
-    // Marcar conductor como no disponible temporalmente
-    await query(
-      'UPDATE conductores SET disponible = FALSE WHERE id = $1',
-      [conductor_id]
-    )
-
     res.status(201).json({
       mensaje: 'Taxi solicitado. Esperando confirmación del conductor.',
       viaje_id,
@@ -137,11 +138,15 @@ const aceptarViaje = async (req, res) => {
       [req.usuario.id]
     )
 
-    await query(
+    const aceptado = await query(
       `UPDATE viajes SET estado = 'aceptado', aceptado_en = NOW()
        WHERE id = $1 AND conductor_id = $2 AND estado = 'solicitado'`,
       [id, conductor.rows[0].id]
     )
+
+    if (aceptado.rowCount === 0) {
+      return res.status(409).json({ error: 'Este viaje ya no está disponible para aceptar' })
+    }
 
     res.json({ mensaje: 'Viaje aceptado. Ve al punto de recojo.', estado: 'aceptado' })
   } catch (error) {
@@ -161,11 +166,17 @@ const completarViaje = async (req, res) => {
       [req.usuario.id]
     )
 
-    await query(
+    // Solo se completa un viaje en curso: antes se podía "completar" uno
+    // cancelado y liberar igual la garantía a la plataforma.
+    const completado = await query(
       `UPDATE viajes SET estado = 'completado', completado_en = NOW()
-       WHERE id = $1 AND conductor_id = $2`,
+       WHERE id = $1 AND conductor_id = $2 AND estado IN ('aceptado','en_camino','recogido')`,
       [id, conductor.rows[0].id]
     )
+
+    if (completado.rowCount === 0) {
+      return res.status(409).json({ error: 'Este viaje no está en curso' })
+    }
 
     // Liberar el S/ 1.50 a la plataforma
     await query(
@@ -177,9 +188,9 @@ const completarViaje = async (req, res) => {
       [id]
     )
 
-    // El conductor vuelve a estar disponible
+    // El conductor vuelve a estar disponible y suma un viaje realizado
     await query(
-      'UPDATE conductores SET disponible = TRUE WHERE id = $1',
+      'UPDATE conductores SET disponible = TRUE, total_viajes = total_viajes + 1 WHERE id = $1',
       [conductor.rows[0].id]
     )
 
@@ -197,12 +208,15 @@ const cancelarViaje = async (req, res) => {
     const { id } = req.params
     const { motivo } = req.body
 
+    // Solo el pasajero dueño del viaje puede cancelarlo (antes cualquier
+    // pasajero con el id podía cancelar viajes ajenos)
     const viaje = await query(
       `SELECT v.*, pv.id as pago_id
        FROM viajes v
+       JOIN pasajeros p ON p.id = v.pasajero_id
        LEFT JOIN pagos_viaje pv ON pv.viaje_id = v.id
-       WHERE v.id = $1`,
-      [id]
+       WHERE v.id = $1 AND p.usuario_id = $2`,
+      [id, req.usuario.id]
     )
 
     if (viaje.rows.length === 0) {
@@ -210,6 +224,10 @@ const cancelarViaje = async (req, res) => {
     }
 
     const v = viaje.rows[0]
+
+    if (!['solicitado', 'aceptado', 'en_camino'].includes(v.estado)) {
+      return res.status(409).json({ error: 'Este viaje ya no se puede cancelar' })
+    }
     const fueDepachado = ['aceptado', 'en_camino'].includes(v.estado)
 
     // Actualizar estado del viaje
@@ -277,6 +295,11 @@ const cancelarViaje = async (req, res) => {
       )
       respuesta.mensaje = 'Viaje cancelado. El S/ 1.50 será devuelto.'
       respuesta.reembolso = true
+
+      // El conductor había sido reservado al solicitar: queda libre otra vez
+      if (v.conductor_id) {
+        await query('UPDATE conductores SET disponible = TRUE WHERE id = $1', [v.conductor_id])
+      }
     }
 
     res.json(respuesta)
@@ -293,13 +316,16 @@ const calificarViaje = async (req, res) => {
     const { id } = req.params
     const { estrellas, comentario } = req.body
 
-    if (!estrellas || estrellas < 1 || estrellas > 5) {
+    if (!Number.isInteger(Number(estrellas)) || estrellas < 1 || estrellas > 5) {
       return res.status(400).json({ error: 'Calificación debe ser entre 1 y 5 estrellas' })
     }
 
     const viaje = await query(
-      'SELECT conductor_id, pasajero_id, estado FROM viajes WHERE id = $1',
-      [id]
+      `SELECT v.conductor_id, v.pasajero_id, v.estado
+       FROM viajes v
+       JOIN pasajeros p ON p.id = v.pasajero_id
+       WHERE v.id = $1 AND p.usuario_id = $2`,
+      [id, req.usuario.id]
     )
 
     if (viaje.rows.length === 0) {

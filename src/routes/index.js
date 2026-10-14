@@ -7,6 +7,8 @@ const authCtrl      = require('../controllers/authController')
 const conductorCtrl = require('../controllers/conductorController')
 const viajeCtrl     = require('../controllers/viajeController')
 const adminCtrl     = require('../controllers/adminController')
+const registroCtrl  = require('../controllers/registroController')
+const { documentosConductor } = require('../middlewares/upload')
 
 // ══════════════════════════════════════════
 // AUTH — público, no requiere token
@@ -14,6 +16,8 @@ const adminCtrl     = require('../controllers/adminController')
 router.post('/auth/registrar',      authCtrl.registrar)
 router.post('/auth/solicitar-otp',  authCtrl.solicitarOTP)
 router.post('/auth/verificar-otp',  authCtrl.verificarOTP)
+router.post('/auth/google',                    authCtrl.loginGoogle)
+router.post('/auth/google/completar-pasajero', authCtrl.completarGoogle)
 
 // ══════════════════════════════════════════
 // CONDUCTOR — requiere token de conductor
@@ -40,38 +44,19 @@ router.post('/viajes/:id/calificar',           verificarToken, soloPasajero,  vi
 // ══════════════════════════════════════════
 router.get ('/admin/dashboard',                     verificarToken, soloAdmin, adminCtrl.dashboard)
 router.get ('/admin/conductores',                   verificarToken, soloAdmin, adminCtrl.listarConductores)
+router.get ('/admin/conductores/:id',               verificarToken, soloAdmin, adminCtrl.detalleConductor)
 router.put ('/admin/conductores/:id/documentos',    verificarToken, soloAdmin, adminCtrl.revisarDocumentos)
 router.post('/admin/suscripciones/confirmar',       verificarToken, soloAdmin, adminCtrl.confirmarSuscripcion)
 router.get ('/admin/viajes',                        verificarToken, soloAdmin, adminCtrl.listarViajes)
+router.get ('/admin/pasajeros',                     verificarToken, soloAdmin, adminCtrl.listarPasajeros)
+router.put ('/admin/usuarios/:id/estado',           verificarToken, soloAdmin, adminCtrl.cambiarEstadoUsuario)
+router.get ('/admin/documentos/:archivo',           verificarToken, soloAdmin, adminCtrl.verDocumento)
 
 
-const multer = require('multer')
-const path = require('path')
-const fs = require('fs')
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = 'uploads/'
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir)
-    cb(null, dir)
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`)
-  }
-})
-
-const upload = multer({ storage, limits: { fileSize: 5 * 1024 * 1024 } })
-
-router.post('/auth/registrar-conductor', upload.fields([
-  { name: 'foto_dni_frontal' },
-  { name: 'foto_dni_trasera' },
-  { name: 'foto_licencia' },
-  { name: 'foto_vehiculo' },
-  { name: 'foto_perfil' },
-]), require('../controllers/registroController').registrarConductor)
-
-router.post('/auth/registrar-pasajero', require('../controllers/registroController').registrarPasajero)
-
-
+// ══════════════════════════════════════════
+// REGISTRO PÚBLICO (portal web)
+// ══════════════════════════════════════════
+router.post('/auth/registrar-conductor', documentosConductor, registroCtrl.registrarConductor)
+router.post('/auth/registrar-pasajero',  registroCtrl.registrarPasajero)
 
 module.exports = router

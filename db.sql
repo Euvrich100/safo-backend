@@ -8,6 +8,8 @@ CREATE TABLE usuarios (
     estado        VARCHAR(20)  NOT NULL DEFAULT 'activo' CHECK (estado IN ('activo', 'suspendido', 'inactivo')),
     otp_codigo    VARCHAR(6),
     otp_expira_en TIMESTAMP,
+    email         VARCHAR(255) UNIQUE,
+    google_id     VARCHAR(255) UNIQUE,
     creado_en     TIMESTAMP    NOT NULL DEFAULT NOW(),
     actualizado_en TIMESTAMP   NOT NULL DEFAULT NOW()
 );
@@ -93,4 +95,17 @@ CREATE TABLE pagos_viaje (
     monto_conductor  DECIMAL(6,2) DEFAULT 0.00,
     monto_plataforma DECIMAL(6,2) DEFAULT 0.00,
     referencia_pago  VARCHAR(100),
-    creado_en        TIMESTAMP NOT NULL
+    creado_en        TIMESTAMP NOT NULL DEFAULT NOW(),
+    actualizado_en   TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- ══════════════════════════════════════════
+-- ÍNDICES — Postgres no indexa una FK automáticamente
+-- (solo PRIMARY KEY y UNIQUE), y estas se filtran seguido en WHERE/JOIN.
+-- conductores.usuario_id y pasajeros.usuario_id ya están cubiertas por su
+-- UNIQUE(usuario_id), así que no se repiten aquí.
+-- ══════════════════════════════════════════
+CREATE INDEX idx_suscripciones_conductor_id ON suscripciones(conductor_id);
+CREATE INDEX idx_viajes_conductor_id        ON viajes(conductor_id);
+CREATE INDEX idx_viajes_pasajero_id         ON viajes(pasajero_id);
+CREATE INDEX idx_pagos_viaje_viaje_id       ON pagos_viaje(viaje_id);
