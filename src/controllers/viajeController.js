@@ -1,4 +1,6 @@
+const crypto = require('crypto')
 const { query, pool } = require('../config/database')
+const { leerAjustes, cotizar, zonaDe } = require('../services/plataforma')
 
 // Minutos que tiene el conductor para responder una solicitud. Si no responde,
 // se cancela sola y se devuelve la garantía al pasajero (si no, ambos quedarían
@@ -61,6 +63,7 @@ const conductoresDisponibles = async (req, res) => {
            AND c.suscripcion_vence >= CURRENT_DATE
            AND c.lat_actual IS NOT NULL
            AND c.lng_actual IS NOT NULL
+           AND c.actualizado_en > NOW() - INTERVAL '15 minutes'
        ) cercanos
        WHERE distancia_km <= $3::float
        ORDER BY distancia_km ASC
@@ -113,6 +116,20 @@ const solicitarViaje = async (req, res) => {
 
   let client
   try {
+    // Zona de servicio: solo se pide taxi dentro de las zonas activas del admin
+    const { restringido, zona } = await zonaDe(latO, lngO)
+    if (restringido && !zona) {
+      return res.status(422).json({ error: 'Tu ubicación está fuera de las zonas de servicio de SafO', codigo: 'FUERA_DE_ZONA' })
+    }
+    const ajustes = await leerAjustes()
+    let cot = null
+    if (latD !== null && lngD !== null) {
+      cot = await cotizar({
+        latO, lngO, latD, lngD,
+        distancia_km: req.body.distancia_km, duracion_min: req.body.duracion_min
+      })
+    }
+
     const pasajero = await query('SELECT id FROM pasajeros WHERE usuario_id = $1', [req.usuario.id])
     if (pasajero.rows.length === 0) {
       return res.status(404).json({ error: 'Perfil de pasajero no encontrado' })
@@ -152,14 +169,16 @@ const solicitarViaje = async (req, res) => {
         conductor_id, pasajero_id, estado,
         lat_origen, lng_origen, direccion_origen,
         lat_destino, lng_destino, direccion_destino,
-        lat_conductor_acepto, lng_conductor_acepto
-       ) VALUES ($1, $2, 'solicitado', $3, $4, $5, $6, $7, $8, $9, $10)
+        lat_conductor_acepto, lng_conductor_acepto,
+        distancia_km, duracion_min, tarifa_estimada
+       ) VALUES ($1, $2, 'solicitado', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING id`,
       [
         conductor_id, pasajero_id,
         latO, lngO, direccion_origen || null,
         latD, lngD, direccion_destino || null,
-        conductor.rows[0].lat_actual, conductor.rows[0].lng_actual
+        conductor.rows[0].lat_actual, conductor.rows[0].lng_actual,
+        cot?.distancia_km ?? null, cot?.duracion_min ?? null, cot?.tarifa ?? null
       ]
     )
     const viaje_id = viaje.rows[0].id
@@ -167,8 +186,8 @@ const solicitarViaje = async (req, res) => {
     // Garantía S/ 1.50 "retenida" hasta que el viaje termine o se cancele
     await client.query(
       `INSERT INTO pagos_viaje (viaje_id, monto_total, metodo_pago, tipo, estado, referencia_pago)
-       VALUES ($1, 1.50, $2, 'garantia', 'retenido', $3)`,
-      [viaje_id, metodo_pago, ref]
+       VALUES ($1, $4, $2, 'garantia', 'retenido', $3)`,
+      [viaje_id, metodo_pago, ref, ajustes.garantia_viaje]
     )
 
     await client.query('COMMIT')
@@ -176,7 +195,8 @@ const solicitarViaje = async (req, res) => {
     res.status(201).json({
       mensaje: 'Taxi solicitado. Esperando confirmación del conductor.',
       viaje_id,
-      estado: 'solicitado'
+      estado: 'solicitado',
+      tarifa_estimada: cot?.tarifa ?? null
     })
   } catch (error) {
     if (client) await client.query('ROLLBACK').catch(() => {})
@@ -194,6 +214,7 @@ const SELECT_VIAJE_PASAJERO = `
   SELECT v.id, v.estado, v.direccion_origen, v.direccion_destino,
          v.lat_origen, v.lng_origen, v.lat_destino, v.lng_destino,
          v.solicitado_en, v.aceptado_en, v.completado_en, v.cancelacion_motivo,
+         v.distancia_km, v.duracion_min, v.tarifa_estimada, v.token_compartir,
          GREATEST(0, EXTRACT(EPOCH FROM (v.solicitado_en + make_interval(mins => ${SOLICITUD_TIMEOUT_MIN}) - NOW())))::int AS segundos_restantes,
          u.nombre AS conductor_nombre,
          CASE WHEN v.estado <> 'solicitado' THEN u.celular END AS conductor_celular,
@@ -295,14 +316,15 @@ const completarViaje = async (req, res) => {
       return res.status(409).json({ error: 'Este viaje no está en curso' })
     }
 
-    // Liberar el S/ 1.50 a la plataforma
+    // Liberar la garantía a la plataforma
+    const ajustesC = await leerAjustes()
     await query(
       `UPDATE pagos_viaje SET
         estado = 'liberado_plataforma',
-        monto_plataforma = 1.50,
+        monto_plataforma = $2,
         actualizado_en = NOW()
        WHERE viaje_id = $1`,
-      [id]
+      [id, ajustesC.garantia_viaje]
     )
 
     // El conductor vuelve a estar disponible y suma un viaje realizado
@@ -363,14 +385,15 @@ const cancelarViaje = async (req, res) => {
     if (fueDepachado) {
       // Conductor ya fue despachado — retener S/ 1.50
       // S/ 1.00 para el conductor, S/ 0.50 para la plataforma
+      const ajustesX = await leerAjustes()
       await query(
         `UPDATE pagos_viaje SET
           estado = 'compensado_conductor',
-          monto_conductor = 1.00,
-          monto_plataforma = 0.50,
+          monto_conductor = $2,
+          monto_plataforma = $3,
           actualizado_en = NOW()
          WHERE viaje_id = $1`,
-        [id]
+        [id, ajustesX.compensacion_conductor, ajustesX.compensacion_plataforma]
       )
 
       // Incrementar contador de cancelaciones del pasajero
@@ -394,9 +417,9 @@ const cancelarViaje = async (req, res) => {
         respuesta.advertencia = 'Tu cuenta ha sido suspendida por exceder el límite de cancelaciones.'
       }
 
-      respuesta.mensaje = 'Viaje cancelado. El conductor ya estaba en camino, se retuvo el pago de S/ 1.50.'
+      respuesta.mensaje = `Viaje cancelado. El conductor ya estaba en camino, se retuvo la garantía de S/ ${ajustesX.garantia_viaje.toFixed(2)}.`
       respuesta.reembolso = false
-      respuesta.compensacion_conductor = 1.00
+      respuesta.compensacion_conductor = ajustesX.compensacion_conductor
 
       // Devolver disponibilidad al conductor
       await query(
@@ -410,7 +433,7 @@ const cancelarViaje = async (req, res) => {
          WHERE viaje_id = $1`,
         [id]
       )
-      respuesta.mensaje = 'Viaje cancelado. El S/ 1.50 será devuelto.'
+      respuesta.mensaje = 'Viaje cancelado. Tu garantía será devuelta.'
       respuesta.reembolso = true
 
       // El conductor había sido reservado al solicitar: queda libre otra vez
@@ -477,6 +500,7 @@ const viajeActivoConductor = async (req, res) => {
     const r = await query(
       `SELECT v.id, v.estado, v.direccion_origen, v.direccion_destino,
               v.lat_origen, v.lng_origen, v.lat_destino, v.lng_destino, v.solicitado_en,
+              v.distancia_km, v.duracion_min, v.tarifa_estimada,
               GREATEST(0, EXTRACT(EPOCH FROM (v.solicitado_en + make_interval(mins => ${SOLICITUD_TIMEOUT_MIN}) - NOW())))::int AS segundos_restantes,
               up.nombre AS pasajero_nombre,
               CASE WHEN v.estado <> 'solicitado' THEN up.celular END AS pasajero_celular,

@@ -9,6 +9,9 @@ const viajeCtrl     = require('../controllers/viajeController')
 const adminCtrl     = require('../controllers/adminController')
 const registroCtrl  = require('../controllers/registroController')
 const cuentaCtrl    = require('../controllers/cuentaController')
+const segCtrl       = require('../controllers/seguridadController')
+const platCtrl      = require('../controllers/plataformaController')
+const { auditar }   = require('../services/auditoria')
 const { documentosConductor } = require('../middlewares/upload')
 
 // ══════════════════════════════════════════
@@ -31,6 +34,7 @@ router.put ('/conductores/ubicacion',       verificarToken, soloConductor, condu
 router.get ('/conductores/suscripciones',   verificarToken, soloConductor, conductorCtrl.obtenerSuscripciones)
 router.get ('/conductores/viajes',          verificarToken, soloConductor, conductorCtrl.obtenerViajes)
 router.get ('/conductores/viaje-activo',    verificarToken, soloConductor, viajeCtrl.viajeActivoConductor)
+router.get ('/conductores/ganancias',       verificarToken, soloConductor, conductorCtrl.obtenerGanancias)
 
 // ══════════════════════════════════════════
 // CUENTA — cualquier usuario con sesión
@@ -42,6 +46,9 @@ router.put ('/cuenta/perfil',               verificarToken, cuentaCtrl.actualiza
 // VIAJES — pasajero solicita, conductor atiende
 // ══════════════════════════════════════════
 router.get ('/viajes/conductores-disponibles', verificarToken, viajeCtrl.conductoresDisponibles)
+router.get ('/ajustes-publicos',            verificarToken, segCtrl.ajustesPublicos)
+router.get ('/viajes/cotizar',                 verificarToken, segCtrl.cotizarViaje)
+router.post('/viajes/:id/compartir',           verificarToken, soloPasajero,  segCtrl.compartirViaje)
 router.post('/viajes/solicitar',               verificarToken, soloPasajero,  viajeCtrl.solicitarViaje)
 router.get ('/viajes/mi-viaje',                  verificarToken, soloPasajero,  viajeCtrl.miViaje)
 router.get ('/viajes/mis-viajes',                 verificarToken, soloPasajero,  viajeCtrl.misViajes)
@@ -58,14 +65,40 @@ router.post('/viajes/:id/calificar',           verificarToken, soloPasajero,  vi
 router.get ('/admin/dashboard',                     verificarToken, soloAdmin, adminCtrl.dashboard)
 router.get ('/admin/conductores',                   verificarToken, soloAdmin, adminCtrl.listarConductores)
 router.get ('/admin/conductores/:id',               verificarToken, soloAdmin, adminCtrl.detalleConductor)
-router.put ('/admin/conductores/:id/documentos',    verificarToken, soloAdmin, adminCtrl.revisarDocumentos)
-router.post('/admin/suscripciones/confirmar',       verificarToken, soloAdmin, adminCtrl.confirmarSuscripcion)
+router.put ('/admin/conductores/:id/documentos',    verificarToken, soloAdmin, auditar('conductor.revisar_documentos', 'conductor'), adminCtrl.revisarDocumentos)
+router.post('/admin/suscripciones/confirmar',       verificarToken, soloAdmin, auditar('suscripcion.confirmar', 'suscripcion'), adminCtrl.confirmarSuscripcion)
 router.get ('/admin/viajes',                        verificarToken, soloAdmin, adminCtrl.listarViajes)
 router.get ('/admin/pasajeros',                     verificarToken, soloAdmin, adminCtrl.listarPasajeros)
-router.put ('/admin/usuarios/:id/estado',           verificarToken, soloAdmin, adminCtrl.cambiarEstadoUsuario)
-router.post('/admin/usuarios/:id/restablecer-clave', verificarToken, soloAdmin, cuentaCtrl.restablecerClave)
+router.put ('/admin/usuarios/:id/estado',           verificarToken, soloAdmin, auditar('usuario.cambiar_estado', 'usuario'), adminCtrl.cambiarEstadoUsuario)
+router.post('/admin/usuarios/:id/restablecer-clave', verificarToken, soloAdmin, auditar('usuario.restablecer_clave', 'usuario'), cuentaCtrl.restablecerClave)
 router.get ('/admin/documentos/:archivo',           verificarToken, soloAdmin, adminCtrl.verDocumento)
 
+
+// ══════════════════════════════════════════
+// SEGURIDAD Y ATENCIÓN — SOS, reclamos, zonas, seguimiento público
+// ══════════════════════════════════════════
+router.post('/sos',                  verificarToken, segCtrl.crearSOS)
+router.post('/reclamos',             verificarToken, segCtrl.crearReclamo)
+router.get ('/reclamos/mios',        verificarToken, segCtrl.misReclamos)
+router.get ('/zonas',                verificarToken, platCtrl.listarZonas)
+router.get ('/publico/viaje/:token', segCtrl.seguimientoPublico)
+
+// ══════════════════════════════════════════
+// ADMIN — tablero, mapa, tarifas, zonas, reclamos, SOS y auditoría
+// ══════════════════════════════════════════
+router.get   ('/admin/estadisticas',     verificarToken, soloAdmin, platCtrl.estadisticas)
+router.get   ('/admin/alertas',          verificarToken, soloAdmin, platCtrl.alertas)
+router.get   ('/admin/mapa-vivo',        verificarToken, soloAdmin, platCtrl.mapaVivo)
+router.get   ('/admin/configuracion',    verificarToken, soloAdmin, platCtrl.obtenerConfiguracion)
+router.put   ('/admin/configuracion',    verificarToken, soloAdmin, auditar('configuracion.guardar', 'configuracion'), platCtrl.guardarConfiguracion)
+router.post  ('/admin/zonas',            verificarToken, soloAdmin, auditar('zona.crear', 'zona'), platCtrl.crearZona)
+router.put   ('/admin/zonas/:id',        verificarToken, soloAdmin, auditar('zona.actualizar', 'zona'), platCtrl.actualizarZona)
+router.delete('/admin/zonas/:id',        verificarToken, soloAdmin, auditar('zona.eliminar', 'zona'), platCtrl.eliminarZona)
+router.get   ('/admin/reclamos',         verificarToken, soloAdmin, platCtrl.listarReclamos)
+router.put   ('/admin/reclamos/:id',     verificarToken, soloAdmin, auditar('reclamo.resolver', 'reclamo'), platCtrl.resolverReclamo)
+router.get   ('/admin/sos',              verificarToken, soloAdmin, platCtrl.listarSOS)
+router.put   ('/admin/sos/:id/atender',  verificarToken, soloAdmin, auditar('sos.atender', 'sos'), platCtrl.atenderSOS)
+router.get   ('/admin/auditoria',        verificarToken, soloAdmin, platCtrl.listarAuditoria)
 
 // ══════════════════════════════════════════
 // REGISTRO PÚBLICO (portal web)

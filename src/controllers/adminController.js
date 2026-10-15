@@ -282,6 +282,7 @@ const listarViajes = async (req, res) => {
       `SELECT v.id, v.estado, v.direccion_origen, v.direccion_destino,
               v.solicitado_en, v.completado_en, v.cancelado_en,
               v.conductor_fue_despachado, v.cancelacion_motivo,
+              v.distancia_km, v.duracion_min, v.tarifa_estimada,
               uc.nombre as conductor, up.nombre as pasajero,
               pv.monto_total, pv.estado as estado_pago,
               pv.monto_conductor, pv.monto_plataforma
