@@ -1,6 +1,6 @@
 const crypto = require('crypto')
 const { query, pool } = require('../config/database')
-const { leerAjustes, cotizar, zonaDe } = require('../services/plataforma')
+const { leerAjustes, cotizar, zonaDe, SERVICIOS, servicioValido } = require('../services/plataforma')
 
 // Minutos que tiene el conductor para responder una solicitud. Si no responde,
 // se cancela sola y se devuelve la garantía al pasajero (si no, ambos quedarían
@@ -31,6 +31,8 @@ const expirarSolicitudes = async () => {
 const conductoresDisponibles = async (req, res) => {
   try {
     const { lat, lng, radio_km = 5 } = req.query
+    // Servicio que busca el pasajero: «taxi» (taxi, carro, bajaj) o «moto» (moto lineal)
+    const tipos = SERVICIOS[servicioValido(req.query.servicio)]
 
     if (!lat || !lng) {
       return res.status(400).json({ error: 'Ubicación requerida' })
@@ -47,7 +49,7 @@ const conductoresDisponibles = async (req, res) => {
     // acos reciba 1.0000000002 por redondeo y devuelva NaN.
     const resultado = await query(
       `SELECT * FROM (
-         SELECT c.id, u.nombre, c.placa, c.vehiculo_marca, c.vehiculo_modelo,
+         SELECT c.id, u.nombre, c.placa, c.tipo_vehiculo, c.vehiculo_marca, c.vehiculo_modelo,
                 c.vehiculo_color, c.vehiculo_anno, c.calificacion_prom, c.total_viajes,
                 c.lat_actual, c.lng_actual,
                 ROUND((6371 * acos(LEAST(1, GREATEST(-1,
@@ -61,6 +63,7 @@ const conductoresDisponibles = async (req, res) => {
            AND c.estado_doc = 'aprobado'
            AND u.estado = 'activo'
            AND c.suscripcion_vence >= CURRENT_DATE
+           AND c.tipo_vehiculo = ANY($4::text[])
            AND c.lat_actual IS NOT NULL
            AND c.lng_actual IS NOT NULL
            AND c.actualizado_en > NOW() - INTERVAL '15 minutes'
@@ -68,7 +71,7 @@ const conductoresDisponibles = async (req, res) => {
        WHERE distancia_km <= $3::float
        ORDER BY distancia_km ASC
        LIMIT 20`,
-      [latN, lngN, radio]
+      [latN, lngN, radio, tipos]
     )
 
     res.json(resultado.rows)
@@ -91,6 +94,7 @@ const solicitarViaje = async (req, res) => {
     lat_destino, lng_destino, direccion_destino,
     referencia_pago
   } = req.body
+  const servicio = servicioValido(req.body.servicio)
   const metodo_pago = String(req.body.metodo_pago || '').toLowerCase()
 
   // Todo se valida ANTES de reservar al conductor: antes un método de pago
@@ -126,7 +130,7 @@ const solicitarViaje = async (req, res) => {
     if (latD !== null && lngD !== null) {
       cot = await cotizar({
         latO, lngO, latD, lngD,
-        distancia_km: req.body.distancia_km, duracion_min: req.body.duracion_min
+        distancia_km: req.body.distancia_km, duracion_min: req.body.duracion_min, servicio
       })
     }
 
@@ -156,8 +160,9 @@ const solicitarViaje = async (req, res) => {
        WHERE c.id = $1 AND u.id = c.usuario_id
          AND c.disponible = TRUE AND u.estado = 'activo'
          AND c.estado_doc = 'aprobado' AND c.suscripcion_vence >= CURRENT_DATE
+         AND c.tipo_vehiculo = ANY($2::text[])
        RETURNING c.lat_actual, c.lng_actual`,
-      [conductor_id]
+      [conductor_id, SERVICIOS[servicio]]
     )
     if (conductor.rows.length === 0) {
       await client.query('ROLLBACK')
@@ -170,15 +175,15 @@ const solicitarViaje = async (req, res) => {
         lat_origen, lng_origen, direccion_origen,
         lat_destino, lng_destino, direccion_destino,
         lat_conductor_acepto, lng_conductor_acepto,
-        distancia_km, duracion_min, tarifa_estimada
-       ) VALUES ($1, $2, 'solicitado', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        distancia_km, duracion_min, tarifa_estimada, servicio
+       ) VALUES ($1, $2, 'solicitado', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING id`,
       [
         conductor_id, pasajero_id,
         latO, lngO, direccion_origen || null,
         latD, lngD, direccion_destino || null,
         conductor.rows[0].lat_actual, conductor.rows[0].lng_actual,
-        cot?.distancia_km ?? null, cot?.duracion_min ?? null, cot?.tarifa ?? null
+        cot?.distancia_km ?? null, cot?.duracion_min ?? null, cot?.tarifa ?? null, servicio
       ]
     )
     const viaje_id = viaje.rows[0].id
@@ -193,10 +198,11 @@ const solicitarViaje = async (req, res) => {
     await client.query('COMMIT')
 
     res.status(201).json({
-      mensaje: 'Taxi solicitado. Esperando confirmación del conductor.',
+      mensaje: servicio === 'moto' ? 'Moto solicitada. Esperando confirmación del conductor.' : 'Taxi solicitado. Esperando confirmación del conductor.',
       viaje_id,
       estado: 'solicitado',
-      tarifa_estimada: cot?.tarifa ?? null
+      tarifa_estimada: cot?.tarifa ?? null,
+      servicio
     })
   } catch (error) {
     if (client) await client.query('ROLLBACK').catch(() => {})
@@ -214,11 +220,11 @@ const SELECT_VIAJE_PASAJERO = `
   SELECT v.id, v.estado, v.direccion_origen, v.direccion_destino,
          v.lat_origen, v.lng_origen, v.lat_destino, v.lng_destino,
          v.solicitado_en, v.aceptado_en, v.completado_en, v.cancelacion_motivo,
-         v.distancia_km, v.duracion_min, v.tarifa_estimada, v.token_compartir,
+         v.distancia_km, v.duracion_min, v.tarifa_estimada, v.token_compartir, v.servicio,
          GREATEST(0, EXTRACT(EPOCH FROM (v.solicitado_en + make_interval(mins => ${SOLICITUD_TIMEOUT_MIN}) - NOW())))::int AS segundos_restantes,
          u.nombre AS conductor_nombre,
          CASE WHEN v.estado <> 'solicitado' THEN u.celular END AS conductor_celular,
-         c.placa, c.vehiculo_marca, c.vehiculo_modelo, c.vehiculo_color, c.vehiculo_anno,
+         c.placa, c.tipo_vehiculo, c.vehiculo_marca, c.vehiculo_modelo, c.vehiculo_color, c.vehiculo_anno,
          c.calificacion_prom, c.total_viajes, c.lat_actual, c.lng_actual,
          pv.metodo_pago, pv.estado AS pago_estado, pv.monto_total, pv.referencia_pago
   FROM viajes v
@@ -500,7 +506,7 @@ const viajeActivoConductor = async (req, res) => {
     const r = await query(
       `SELECT v.id, v.estado, v.direccion_origen, v.direccion_destino,
               v.lat_origen, v.lng_origen, v.lat_destino, v.lng_destino, v.solicitado_en,
-              v.distancia_km, v.duracion_min, v.tarifa_estimada,
+              v.distancia_km, v.duracion_min, v.tarifa_estimada, v.servicio,
               GREATEST(0, EXTRACT(EPOCH FROM (v.solicitado_en + make_interval(mins => ${SOLICITUD_TIMEOUT_MIN}) - NOW())))::int AS segundos_restantes,
               up.nombre AS pasajero_nombre,
               CASE WHEN v.estado <> 'solicitado' THEN up.celular END AS pasajero_celular,

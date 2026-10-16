@@ -6,7 +6,7 @@ const obtenerPerfil = async (req, res) => {
   try {
     const resultado = await query(
       `SELECT u.nombre, u.celular, u.estado,
-              c.id as conductor_id, c.dni, c.licencia_numero, c.placa,
+              c.id as conductor_id, c.dni, c.licencia_numero, c.placa, c.tipo_vehiculo,
               c.vehiculo_marca, c.vehiculo_modelo, c.vehiculo_color, c.vehiculo_anno,
               c.estado_doc, c.rechazo_motivo, c.disponible,
               c.calificacion_prom, c.total_viajes, c.suscripcion_vence,
@@ -156,7 +156,7 @@ const obtenerViajes = async (req, res) => {
     const resultado = await query(
       `SELECT v.id, v.estado, v.direccion_origen, v.direccion_destino,
               v.solicitado_en, v.completado_en,
-              v.distancia_km, v.duracion_min, v.tarifa_estimada,
+              v.distancia_km, v.duracion_min, v.tarifa_estimada, v.servicio,
               u.nombre as nombre_pasajero,
               pv.monto_total, pv.estado as estado_pago
        FROM viajes v

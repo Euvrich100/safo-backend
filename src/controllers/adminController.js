@@ -57,7 +57,7 @@ const dashboard = async (req, res) => {
 // solicitudes de registro por revisar.
 const listarConductores = async (req, res) => {
   try {
-    const { estado_doc, estado_usuario, buscar } = req.query
+    const { estado_doc, estado_usuario, buscar, tipo_vehiculo } = req.query
     const { limit, offset } = paginar(req.query.page, req.query.limit)
 
     const filtros = []
@@ -72,6 +72,10 @@ const listarConductores = async (req, res) => {
       filtros.push(`u.estado = $${i++}`)
       params.push(estado_usuario)
     }
+    if (tipo_vehiculo) {
+      filtros.push(`c.tipo_vehiculo = $${i++}`)
+      params.push(tipo_vehiculo)
+    }
     if (buscar) {
       filtros.push(`(u.nombre ILIKE $${i} OR u.celular LIKE $${i} OR c.dni LIKE $${i} OR c.placa ILIKE $${i})`)
       params.push(`%${buscar}%`)
@@ -83,7 +87,7 @@ const listarConductores = async (req, res) => {
 
     const resultado = await query(
       `SELECT u.nombre, u.celular, u.estado as estado_usuario,
-              c.id, c.dni, c.placa, c.vehiculo_marca, c.vehiculo_modelo,
+              c.id, c.dni, c.placa, c.tipo_vehiculo, c.vehiculo_marca, c.vehiculo_modelo,
               c.vehiculo_color, c.estado_doc, c.rechazo_motivo, c.disponible,
               c.calificacion_prom, c.total_viajes, c.suscripcion_vence, c.creado_en
        FROM conductores c
@@ -109,7 +113,7 @@ const detalleConductor = async (req, res) => {
     const resultado = await query(
       `SELECT u.nombre, u.celular, u.estado as estado_usuario, u.creado_en as registrado_en,
               u.id as usuario_id, c.id, c.dni, c.fecha_nacimiento, c.direccion,
-              c.licencia_numero, c.licencia_categoria, c.placa,
+              c.licencia_numero, c.licencia_categoria, c.placa, c.tipo_vehiculo,
               c.vehiculo_marca, c.vehiculo_modelo, c.vehiculo_color, c.vehiculo_anno,
               c.dni_foto_frontal_url, c.dni_foto_trasera_url, c.licencia_foto_url,
               c.vehiculo_foto_url, c.perfil_foto_url,
@@ -282,7 +286,7 @@ const listarViajes = async (req, res) => {
       `SELECT v.id, v.estado, v.direccion_origen, v.direccion_destino,
               v.solicitado_en, v.completado_en, v.cancelado_en,
               v.conductor_fue_despachado, v.cancelacion_motivo,
-              v.distancia_km, v.duracion_min, v.tarifa_estimada,
+              v.distancia_km, v.duracion_min, v.tarifa_estimada, v.servicio,
               uc.nombre as conductor, up.nombre as pasajero,
               pv.monto_total, pv.estado as estado_pago,
               pv.monto_conductor, pv.monto_plataforma

@@ -1,6 +1,7 @@
 const crypto = require('crypto')
 const { query } = require('../config/database')
-const { cotizar, zonaDe, leerAjustes } = require('../services/plataforma')
+const { cotizar, zonaDe, leerAjustes, tarifasDe, servicioValido } = require('../services/plataforma')
+const { estadoTrafico } = require('../services/transito')
 
 const ESTADOS_ACTIVOS = ['solicitado', 'aceptado', 'en_camino', 'recogido']
 const num = (v) => (v === undefined || v === null || v === '' ? NaN : Number(v))
@@ -17,7 +18,8 @@ const cotizarViaje = async (req, res) => {
     const [cot, { restringido, zona }] = await Promise.all([
       cotizar({
         latO, lngO, latD, lngD,
-        distancia_km: req.query.distancia_km, duracion_min: req.query.duracion_min
+        distancia_km: req.query.distancia_km, duracion_min: req.query.duracion_min,
+        servicio: servicioValido(req.query.servicio)
       }),
       zonaDe(latO, lngO)
     ])
@@ -41,7 +43,12 @@ const ajustesPublicos = async (req, res) => {
       garantia: a.garantia_viaje,
       compensacion_conductor: a.compensacion_conductor,
       compensacion_plataforma: Math.round((a.garantia_viaje - a.compensacion_conductor) * 100) / 100,
-      radio_busqueda_km: a.radio_busqueda_km
+      radio_busqueda_km: a.radio_busqueda_km,
+      // Para estimar tiempos y tarifa en la web (también como respaldo si no responde la cotización)
+      velocidad_max_kmh: a.velocidad_max_kmh,
+      tarifa: tarifasDe(a, 'taxi'),
+      tarifa_moto: tarifasDe(a, 'moto'),
+      trafico: await estadoTrafico(a)
     })
   } catch (error) {
     console.error('Error ajustesPublicos:', error)
@@ -90,7 +97,7 @@ const seguimientoPublico = async (req, res) => {
               v.lat_origen, v.lng_origen, v.lat_destino, v.lng_destino,
               v.solicitado_en, v.completado_en, v.cancelado_en,
               split_part(u.nombre, ' ', 1) AS conductor_nombre,
-              c.placa, c.vehiculo_marca, c.vehiculo_modelo, c.vehiculo_color,
+              v.servicio, c.placa, c.tipo_vehiculo, c.vehiculo_marca, c.vehiculo_modelo, c.vehiculo_color,
               c.calificacion_prom, c.lat_actual, c.lng_actual,
               split_part(up.nombre, ' ', 1) AS pasajero_nombre
        FROM viajes v

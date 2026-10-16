@@ -137,7 +137,7 @@ const mapaVivo = async (req, res) => {
   try {
     const [conductores, viajes, sos] = await Promise.all([
       query(
-        `SELECT c.id, u.nombre, c.placa, c.vehiculo_marca, c.vehiculo_modelo, c.vehiculo_color,
+        `SELECT c.id, u.nombre, c.placa, c.tipo_vehiculo, c.vehiculo_marca, c.vehiculo_modelo, c.vehiculo_color,
                 c.lat_actual AS lat, c.lng_actual AS lng, c.disponible, c.actualizado_en,
                 EXISTS (SELECT 1 FROM viajes v WHERE v.conductor_id = c.id
                         AND v.estado IN ('aceptado','en_camino','recogido')) AS en_viaje
@@ -146,7 +146,7 @@ const mapaVivo = async (req, res) => {
            AND (c.disponible = TRUE OR EXISTS (SELECT 1 FROM viajes v WHERE v.conductor_id = c.id
                                                AND v.estado IN ('aceptado','en_camino','recogido')))`),
       query(
-        `SELECT v.id, v.estado, v.lat_origen, v.lng_origen, v.lat_destino, v.lng_destino,
+        `SELECT v.id, v.estado, v.servicio, v.lat_origen, v.lng_origen, v.lat_destino, v.lng_destino,
                 v.direccion_origen, v.direccion_destino, v.tarifa_estimada, v.solicitado_en,
                 uc.nombre AS conductor_nombre, up.nombre AS pasajero_nombre
          FROM viajes v
@@ -179,7 +179,19 @@ const LIMITES = {
   tarifa_minima:          [0, 100],
   garantia_viaje:         [0.5, 20],
   compensacion_conductor: [0, 20],
-  radio_busqueda_km:      [0.5, 50]
+  radio_busqueda_km:      [0.5, 50],
+  velocidad_max_kmh:      [15, 90],
+  combustible_precio_galon: [3, 60],
+  rendimiento_km_galon:   [8, 120],
+  trafico_libre:          [0.8, 2],
+  trafico_medio:          [1, 2.5],
+  trafico_pico:           [1, 3],
+  condicion_factor:       [1, 2.5],
+  moto_tarifa_base:       [0, 50],
+  moto_tarifa_km:         [0, 50],
+  moto_tarifa_minuto:     [0, 10],
+  moto_tarifa_minima:     [0, 100],
+  moto_rendimiento_km_galon: [15, 250]
 }
 
 // GET /api/admin/configuracion
@@ -202,7 +214,12 @@ const guardarConfiguracion = async (req, res) => {
   }
   const actuales = await leerAjustes()
   const nuevos = {}
+  let textoCondicion
   for (const [clave, bruto] of Object.entries(valores)) {
+    if (clave === 'condicion_texto') {
+      textoCondicion = String(bruto ?? '').trim().slice(0, 40)
+      continue
+    }
     if (!(clave in LIMITES)) return res.status(400).json({ error: `Ajuste desconocido: ${clave}` })
     const n = Number(bruto)
     const [min, max] = LIMITES[clave]
@@ -211,6 +228,9 @@ const guardarConfiguracion = async (req, res) => {
     }
     nuevos[clave] = Math.round(n * 100) / 100
   }
+  // Si no hay condición especial (factor 1), el texto se borra para no confundir
+  const factorCondicion = nuevos.condicion_factor ?? actuales.condicion_factor
+  if (factorCondicion === 1) textoCondicion = ''
   const garantia = nuevos.garantia_viaje ?? actuales.garantia_viaje
   const compensacion = nuevos.compensacion_conductor ?? actuales.compensacion_conductor
   if (compensacion > garantia) {
@@ -225,6 +245,13 @@ const guardarConfiguracion = async (req, res) => {
         `INSERT INTO configuracion (clave, valor) VALUES ($1, $2)
          ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor, actualizado_en = NOW()`,
         [clave, String(valor)]
+      )
+    }
+    if (textoCondicion !== undefined) {
+      await client.query(
+        `INSERT INTO configuracion (clave, valor) VALUES ('condicion_texto', $1)
+         ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor, actualizado_en = NOW()`,
+        [textoCondicion]
       )
     }
     await client.query('COMMIT')

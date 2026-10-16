@@ -15,6 +15,10 @@ const borrarSubidos = (files = {}) => {
 
 const soloDigitos = (v) => String(v || '').replace(/\D/g, '')
 
+// Vehículos con los que se puede conducir. Taxi, carro y bajaj atienden el servicio «Taxi»;
+// la moto lineal atiende el servicio «Moto».
+const TIPOS_VEHICULO = ['taxi', 'carro', 'bajaj', 'moto_lineal']
+
 // POST /api/auth/registrar-conductor
 // Registro público desde el portal web. La cuenta queda INACTIVA con los
 // documentos en revisión hasta que un administrador la apruebe.
@@ -32,12 +36,15 @@ const registrarConductor = async (req, res) => {
     } = req.body
     const celular = soloDigitos(req.body.celular)
     const dni = soloDigitos(req.body.dni)
+    // Formularios anteriores no mandaban el tipo: se asume taxi
+    const tipo_vehiculo = String(req.body.tipo_vehiculo || 'taxi').toLowerCase()
     const vehiculo_anno = req.body.vehiculo_anno ? parseInt(req.body.vehiculo_anno, 10) : null
     const fecha_nacimiento = req.body.fecha_nacimiento || null
 
     if (!nombre || !celular || !dni || !licencia_numero || !placa) {
       return rechazar(400, 'Completa todos los campos obligatorios')
     }
+    if (!TIPOS_VEHICULO.includes(tipo_vehiculo)) return rechazar(400, 'Elige el tipo de vehículo: taxi, carro, bajaj o moto lineal')
     if (celular.length !== 9) return rechazar(400, 'El celular debe tener 9 dígitos')
     if (dni.length !== 8) return rechazar(400, 'El DNI debe tener 8 dígitos')
     if (!claveValida(req.body.password)) {
@@ -83,15 +90,15 @@ const registrarConductor = async (req, res) => {
       await client.query(
         `INSERT INTO conductores (
            usuario_id, dni, fecha_nacimiento, direccion,
-           licencia_numero, licencia_categoria, placa,
+           licencia_numero, licencia_categoria, placa, tipo_vehiculo,
            vehiculo_marca, vehiculo_modelo, vehiculo_color, vehiculo_anno,
            dni_foto_frontal_url, dni_foto_trasera_url,
            licencia_foto_url, vehiculo_foto_url, perfil_foto_url,
            estado_doc
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'pendiente')`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'pendiente')`,
         [
           usuario.rows[0].id, dni, fecha_nacimiento, direccion || null,
-          licencia_numero, licencia_categoria || null, placaNorm,
+          licencia_numero, licencia_categoria || null, placaNorm, tipo_vehiculo,
           vehiculo_marca || null, vehiculo_modelo || null, vehiculo_color || null, vehiculo_anno,
           nombreArchivo('foto_dni_frontal'), nombreArchivo('foto_dni_trasera'),
           nombreArchivo('foto_licencia'), nombreArchivo('foto_vehiculo'), nombreArchivo('foto_perfil')
