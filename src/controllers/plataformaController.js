@@ -1,3 +1,4 @@
+const { DOCS_AL_DIA_SQL } = require('../services/documentos')
 const { query, pool } = require('../config/database')
 const { leerAjustes, invalidarAjustes, POR_DEFECTO } = require('../services/plataforma')
 
@@ -120,7 +121,10 @@ const alertas = async (req, res) => {
       `SELECT
          (SELECT COUNT(*)::int FROM sos_alertas WHERE estado = 'activa') AS sos_activas,
          (SELECT COUNT(*)::int FROM reclamos WHERE estado IN ('abierto','en_revision')) AS reclamos_abiertos,
-         (SELECT COUNT(*)::int FROM conductores WHERE estado_doc = 'pendiente') AS docs_pendientes`
+         (SELECT COUNT(*)::int FROM conductores WHERE estado_doc = 'pendiente') AS docs_pendientes,
+         (SELECT COUNT(*)::int FROM conductores c WHERE c.estado_doc = 'aprobado'
+            AND EXISTS (SELECT 1 FROM jsonb_each(c.renovaciones) r WHERE r.value->>'estado' = 'pendiente')) AS renovaciones_pendientes,
+         (SELECT COUNT(*)::int FROM conductores c WHERE c.estado_doc = 'aprobado' AND NOT ${DOCS_AL_DIA_SQL}) AS docs_vencidos`
     )
     res.json(r.rows[0])
   } catch (error) {

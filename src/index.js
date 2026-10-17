@@ -53,7 +53,7 @@ app.use((req, res) => {
 // Manejador global de errores
 app.use((err, req, res, next) => {
   // Errores de subida de archivos (tipo inválido, tamaño excedido, etc.)
-  if (err instanceof multer.MulterError || /solo se permiten im[aá]genes/i.test(err.message || '')) {
+  if (err instanceof multer.MulterError || /solo se permiten im[aá]genes|archivo no esperado/i.test(err.message || '')) {
     return res.status(400).json({ error: err.message })
   }
   console.error('Error no manejado:', err)
@@ -66,6 +66,11 @@ app.use((err, req, res, next) => {
 // Cancela las solicitudes que el conductor no respondió a tiempo
 const { expirarSolicitudes } = require('./controllers/viajeController')
 setInterval(expirarSolicitudes, 30 * 1000).unref()
+
+// Desconecta a los conductores con SOAT, licencia o revisión técnica vencidos
+const { desconectarVencidos } = require('./services/documentos')
+setInterval(desconectarVencidos, 10 * 60 * 1000).unref()
+desconectarVencidos()
 
 app.listen(PORT, () => {
   console.log(``)

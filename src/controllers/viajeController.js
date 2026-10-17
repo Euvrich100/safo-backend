@@ -1,6 +1,7 @@
 const crypto = require('crypto')
 const { query, pool } = require('../config/database')
 const { leerAjustes, cotizar, zonaDe, SERVICIOS, servicioValido } = require('../services/plataforma')
+const { DOCS_AL_DIA_SQL, VERIFICADO_SQL } = require('../services/documentos')
 
 // Minutos que tiene el conductor para responder una solicitud. Si no responde,
 // se cancela sola y se devuelve la garantía al pasajero (si no, ambos quedarían
@@ -52,6 +53,8 @@ const conductoresDisponibles = async (req, res) => {
          SELECT c.id, u.nombre, c.placa, c.tipo_vehiculo, c.vehiculo_marca, c.vehiculo_modelo,
                 c.vehiculo_color, c.vehiculo_anno, c.calificacion_prom, c.total_viajes,
                 c.lat_actual, c.lng_actual,
+                (c.perfil_foto_url IS NOT NULL) AS con_foto,
+                ${VERIFICADO_SQL} AS verificado,
                 ROUND((6371 * acos(LEAST(1, GREATEST(-1,
                   cos(radians($1::float)) * cos(radians(c.lat_actual)) *
                   cos(radians(c.lng_actual) - radians($2::float)) +
@@ -63,6 +66,7 @@ const conductoresDisponibles = async (req, res) => {
            AND c.estado_doc = 'aprobado'
            AND u.estado = 'activo'
            AND c.suscripcion_vence >= CURRENT_DATE
+           AND ${DOCS_AL_DIA_SQL}
            AND c.tipo_vehiculo = ANY($4::text[])
            AND c.lat_actual IS NOT NULL
            AND c.lng_actual IS NOT NULL
@@ -160,6 +164,7 @@ const solicitarViaje = async (req, res) => {
        WHERE c.id = $1 AND u.id = c.usuario_id
          AND c.disponible = TRUE AND u.estado = 'activo'
          AND c.estado_doc = 'aprobado' AND c.suscripcion_vence >= CURRENT_DATE
+         AND ${DOCS_AL_DIA_SQL}
          AND c.tipo_vehiculo = ANY($2::text[])
        RETURNING c.lat_actual, c.lng_actual`,
       [conductor_id, SERVICIOS[servicio]]
@@ -226,6 +231,8 @@ const SELECT_VIAJE_PASAJERO = `
          CASE WHEN v.estado <> 'solicitado' THEN u.celular END AS conductor_celular,
          c.placa, c.tipo_vehiculo, c.vehiculo_marca, c.vehiculo_modelo, c.vehiculo_color, c.vehiculo_anno,
          c.calificacion_prom, c.total_viajes, c.lat_actual, c.lng_actual,
+         c.id AS conductor_id, (c.perfil_foto_url IS NOT NULL) AS conductor_con_foto,
+         ${VERIFICADO_SQL} AS conductor_verificado,
          pv.metodo_pago, pv.estado AS pago_estado, pv.monto_total, pv.referencia_pago
   FROM viajes v
   JOIN pasajeros p    ON p.id = v.pasajero_id

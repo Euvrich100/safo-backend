@@ -2,6 +2,10 @@ const path = require('path')
 const fs = require('fs')
 const { query, pool } = require('../config/database')
 const { UPLOADS_DIR } = require('../config/uploads')
+const docs = require('../services/documentos')
+
+// Consulta pública del SOAT por placa (APESEG). El admin la abre para cotejar el documento.
+const URL_CONSULTA_SOAT = process.env.URL_CONSULTA_SOAT || 'https://www.apeseg.org.pe/consultas-soat/'
 
 // Paginación segura: números enteros acotados (evita LIMIT/OFFSET inválidos)
 const paginar = (page, limit, maxLimit = 100) => {
@@ -57,7 +61,7 @@ const dashboard = async (req, res) => {
 // solicitudes de registro por revisar.
 const listarConductores = async (req, res) => {
   try {
-    const { estado_doc, estado_usuario, buscar, tipo_vehiculo } = req.query
+    const { estado_doc, estado_usuario, buscar, tipo_vehiculo, documentos } = req.query
     const { limit, offset } = paginar(req.query.page, req.query.limit)
 
     const filtros = []
@@ -76,6 +80,9 @@ const listarConductores = async (req, res) => {
       filtros.push(`c.tipo_vehiculo = $${i++}`)
       params.push(tipo_vehiculo)
     }
+    // documentos=vencidos: con algún documento vencido · renovaciones: con una renovación por revisar
+    if (documentos === 'vencidos') filtros.push(`NOT ${docs.DOCS_AL_DIA_SQL}`)
+    if (documentos === 'renovaciones') filtros.push(`EXISTS (SELECT 1 FROM jsonb_each(c.renovaciones) r WHERE r.value->>'estado' = 'pendiente')`)
     if (buscar) {
       filtros.push(`(u.nombre ILIKE $${i} OR u.celular LIKE $${i} OR c.dni LIKE $${i} OR c.placa ILIKE $${i})`)
       params.push(`%${buscar}%`)
@@ -89,7 +96,9 @@ const listarConductores = async (req, res) => {
       `SELECT u.nombre, u.celular, u.estado as estado_usuario,
               c.id, c.dni, c.placa, c.tipo_vehiculo, c.vehiculo_marca, c.vehiculo_modelo,
               c.vehiculo_color, c.estado_doc, c.rechazo_motivo, c.disponible,
-              c.calificacion_prom, c.total_viajes, c.suscripcion_vence, c.creado_en
+              c.calificacion_prom, c.total_viajes, c.suscripcion_vence, c.creado_en,
+              c.soat_tipo, c.permiso_municipal_url, ${docs.FECHAS_SQL},
+              (SELECT COUNT(*)::int FROM jsonb_each(c.renovaciones) r WHERE r.value->>'estado' = 'pendiente') AS renovaciones_pendientes
        FROM conductores c
        JOIN usuarios u ON u.id = c.usuario_id
        ${where}
@@ -98,7 +107,11 @@ const listarConductores = async (req, res) => {
       params
     )
 
-    res.json(resultado.rows)
+    res.json(resultado.rows.map(c => ({
+      ...c,
+      vencidos: docs.vencidos(c).map(v => v.etiqueta),
+      por_vencer: docs.vigencias(c).filter(v => v.estado === 'por_vencer').map(v => v.etiqueta),
+    })))
   } catch (error) {
     console.error('Error listarConductores:', error)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -108,26 +121,33 @@ const listarConductores = async (req, res) => {
 // GET /api/admin/conductores/:id
 // Ficha completa de una solicitud, con los nombres de archivo de los
 // documentos (se descargan con GET /api/admin/documentos/:archivo).
+const SELECT_FICHA = `
+  SELECT u.nombre, u.celular, u.estado as estado_usuario, u.creado_en as registrado_en,
+         u.id as usuario_id, c.*, ${docs.FECHAS_SQL},
+         to_char(c.fecha_nacimiento, 'YYYY-MM-DD') AS fecha_nacimiento
+  FROM conductores c
+  JOIN usuarios u ON u.id = c.usuario_id
+  WHERE c.id = $1`
+
+// Arma la ficha: datos + vigencias + lista de revisión + renovaciones por revisar
+const armarFicha = (c) => {
+  const { lat_actual, lng_actual, ...datos } = c
+  return {
+    ...datos,
+    ...docs.resumen(c),
+    checklist: docs.rubros(c),
+    renovaciones: c.renovaciones || {},
+    enlace_consulta_soat: URL_CONSULTA_SOAT,
+  }
+}
+
 const detalleConductor = async (req, res) => {
   try {
-    const resultado = await query(
-      `SELECT u.nombre, u.celular, u.estado as estado_usuario, u.creado_en as registrado_en,
-              u.id as usuario_id, c.id, c.dni, c.fecha_nacimiento, c.direccion,
-              c.licencia_numero, c.licencia_categoria, c.placa, c.tipo_vehiculo,
-              c.vehiculo_marca, c.vehiculo_modelo, c.vehiculo_color, c.vehiculo_anno,
-              c.dni_foto_frontal_url, c.dni_foto_trasera_url, c.licencia_foto_url,
-              c.vehiculo_foto_url, c.perfil_foto_url,
-              c.estado_doc, c.rechazo_motivo, c.suscripcion_vence,
-              c.calificacion_prom, c.total_viajes
-       FROM conductores c
-       JOIN usuarios u ON u.id = c.usuario_id
-       WHERE c.id = $1`,
-      [req.params.id]
-    )
+    const resultado = await query(SELECT_FICHA, [req.params.id])
     if (resultado.rows.length === 0) {
       return res.status(404).json({ error: 'Conductor no encontrado' })
     }
-    res.json(resultado.rows[0])
+    res.json(armarFicha(resultado.rows[0]))
   } catch (error) {
     // 22P02 = id con formato de UUID inválido
     if (error.code === '22P02') return res.status(404).json({ error: 'Conductor no encontrado' })
@@ -147,6 +167,7 @@ const verDocumento = (req, res) => {
     return res.status(404).json({ error: 'Documento no encontrado' })
   }
   res.set('Cache-Control', 'private, max-age=300')
+  res.set('X-Content-Type-Options', 'nosniff')
   res.sendFile(ruta)
 }
 
@@ -163,6 +184,25 @@ const revisarDocumentos = async (req, res) => {
     }
     if (decision === 'rechazado' && !motivo?.trim()) {
       return res.status(400).json({ error: 'Indica el motivo del rechazo' })
+    }
+
+    // Para aprobar: solicitud completa, nada vencido y cada rubro revisado y en orden
+    if (decision === 'aprobado') {
+      const ficha = await client.query(SELECT_FICHA, [id])
+      if (ficha.rows.length === 0) return res.status(404).json({ error: 'Conductor no encontrado' })
+      const f = ficha.rows[0]
+      const faltan = docs.faltantes(f)
+      if (faltan.length > 0) {
+        return res.status(400).json({ error: 'La solicitud está incompleta. Falta: ' + faltan.join(', '), faltantes: faltan })
+      }
+      const venc = docs.vencidos(f).map(v => v.etiqueta)
+      if (venc.length > 0) {
+        return res.status(400).json({ error: 'Hay documentos vencidos: ' + venc.join(', '), vencidos: venc })
+      }
+      const sinRevisar = docs.rubros(f).filter(r => r.obligatorio && r.estado !== 'ok').map(r => r.etiqueta)
+      if (sinRevisar.length > 0) {
+        return res.status(400).json({ error: 'Marca como correctos estos rubros antes de aprobar: ' + sinRevisar.join(', '), sin_revisar: sinRevisar })
+      }
     }
 
     await client.query('BEGIN')
@@ -210,6 +250,100 @@ const revisarDocumentos = async (req, res) => {
     await client.query('ROLLBACK').catch(() => {})
     if (error.code === '22P02') return res.status(404).json({ error: 'Conductor no encontrado' })
     console.error('Error revisarDocumentos:', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  } finally {
+    client.release()
+  }
+}
+
+
+// PUT /api/admin/conductores/:id/verificacion
+// El admin marca un rubro (identidad, licencia, SOAT…) como correcto u observado.
+// body: { rubro, estado: 'ok' | 'observado' | null, nota }
+const verificarRubro = async (req, res) => {
+  try {
+    const { rubro, estado, nota } = req.body
+    if (!['ok', 'observado', null].includes(estado ?? null)) {
+      return res.status(400).json({ error: 'Estado inválido' })
+    }
+    if (estado === 'observado' && !String(nota || '').trim()) {
+      return res.status(400).json({ error: 'Explica qué se observa en este rubro' })
+    }
+    const ficha = await query(SELECT_FICHA, [req.params.id])
+    if (ficha.rows.length === 0) return res.status(404).json({ error: 'Conductor no encontrado' })
+    if (!docs.rubros(ficha.rows[0]).some(r => r.clave === rubro)) {
+      return res.status(400).json({ error: 'Rubro inválido' })
+    }
+
+    if (!estado) {
+      await query(`UPDATE conductores SET verificacion = verificacion - $1::text, actualizado_en = NOW() WHERE id = $2`, [rubro, req.params.id])
+    } else {
+      const valor = { estado, nota: String(nota || '').trim().slice(0, 300) || null, por: req.usuario.id, en: new Date().toISOString() }
+      await query(
+        `UPDATE conductores SET verificacion = jsonb_set(verificacion, ARRAY[$1::text], $2::jsonb, true), actualizado_en = NOW() WHERE id = $3`,
+        [rubro, JSON.stringify(valor), req.params.id]
+      )
+    }
+    const nueva = await query(SELECT_FICHA, [req.params.id])
+    res.json(armarFicha(nueva.rows[0]))
+  } catch (error) {
+    if (error.code === '22P02') return res.status(404).json({ error: 'Conductor no encontrado' })
+    console.error('Error verificarRubro:', error)
+    res.status(500).json({ error: 'Error interno del servidor' })
+  }
+}
+
+// PUT /api/admin/conductores/:id/renovaciones/:tipo
+// Aprueba o rechaza un documento renovado por el conductor (nuevo SOAT, licencia revalidada…).
+// Mientras no se apruebe, el documento vencido sigue bloqueando al conductor.
+const decidirRenovacion = async (req, res) => {
+  const client = await pool.connect()
+  try {
+    const { id, tipo } = req.params
+    const { decision, motivo } = req.body
+    if (!Object.hasOwn(docs.RENOVABLES, tipo)) return res.status(400).json({ error: 'Documento inválido' })
+    if (!['aprobado', 'rechazado'].includes(decision)) return res.status(400).json({ error: 'Decisión inválida' })
+    if (decision === 'rechazado' && !String(motivo || '').trim()) return res.status(400).json({ error: 'Indica el motivo del rechazo' })
+
+    await client.query('BEGIN')
+    const fila = await client.query('SELECT renovaciones FROM conductores WHERE id = $1 FOR UPDATE', [id])
+    if (fila.rows.length === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Conductor no encontrado' }) }
+    const r = fila.rows[0].renovaciones?.[tipo]
+    if (!r || r.estado !== 'pendiente') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'No hay una renovación pendiente de este documento' }) }
+
+    if (decision === 'rechazado') {
+      const nuevo = { ...r, estado: 'rechazado', motivo: String(motivo).trim().slice(0, 300), revisado_en: new Date().toISOString() }
+      await client.query(
+        `UPDATE conductores SET renovaciones = jsonb_set(renovaciones, ARRAY[$1::text], $2::jsonb, true), actualizado_en = NOW() WHERE id = $3`,
+        [tipo, JSON.stringify(nuevo), id]
+      )
+    } else {
+      const campos = {
+        soat: { soat_tipo: r.tipo, soat_numero: r.numero, soat_aseguradora: r.aseguradora, soat_vence: r.vence, soat_foto_url: r.archivo },
+        licencia: { licencia_vence: r.vence, licencia_foto_url: r.archivo, ...(r.categoria ? { licencia_categoria: r.categoria } : {}), ...(r.archivo_reverso ? { licencia_foto_trasera_url: r.archivo_reverso } : {}) },
+        revision: { revision_tecnica_vence: r.vence, revision_tecnica_foto_url: r.archivo },
+        antecedentes: { antecedentes_fecha: r.fecha, antecedentes_url: r.archivo },
+        permiso: { permiso_municipal_numero: r.numero, permiso_municipal_vence: r.vence, permiso_municipal_url: r.archivo },
+      }[tipo]
+      const cols = Object.keys(campos)
+      const rubro = docs.RENOVABLES[tipo].rubro
+      const valorOk = { estado: 'ok', nota: null, por: req.usuario.id, en: new Date().toISOString() }
+      await client.query(
+        `UPDATE conductores SET ${cols.map((c, i) => `${c} = $${i + 3}`).join(', ')},
+           renovaciones = renovaciones - $1::text,
+           verificacion = jsonb_set(verificacion, ARRAY['${rubro}'], $2::jsonb, true),
+           actualizado_en = NOW()
+         WHERE id = $${cols.length + 3}`,
+        [tipo, JSON.stringify(valorOk), ...cols.map(c => campos[c]), id]
+      )
+    }
+    await client.query('COMMIT')
+    const nueva = await query(SELECT_FICHA, [id])
+    res.json(armarFicha(nueva.rows[0]))
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    if (error.code === '22P02') return res.status(404).json({ error: 'Conductor no encontrado' })
+    console.error('Error decidirRenovacion:', error)
     res.status(500).json({ error: 'Error interno del servidor' })
   } finally {
     client.release()
@@ -381,6 +515,6 @@ const cambiarEstadoUsuario = async (req, res) => {
 
 module.exports = {
   dashboard, listarConductores, detalleConductor, verDocumento,
-  revisarDocumentos, confirmarSuscripcion, listarViajes,
+  revisarDocumentos, verificarRubro, decidirRenovacion, confirmarSuscripcion, listarViajes,
   listarPasajeros, cambiarEstadoUsuario
 }

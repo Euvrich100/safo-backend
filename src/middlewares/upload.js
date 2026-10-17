@@ -1,14 +1,17 @@
 const multer = require('multer')
 const { v4: uuidv4 } = require('uuid')
 const { UPLOADS_DIR } = require('../config/uploads')
+const { ARCHIVOS, ARCHIVOS_RENOVACION } = require('../services/documentos')
 
-// Solo se aceptan imágenes — evita que se suban ejecutables u otros archivos
-// disfrazados de "foto" de DNI/licencia/vehículo
-const TIPOS_PERMITIDOS = {
+// Solo se aceptan imágenes (y PDF en los certificados) — evita que se suban
+// ejecutables u otros archivos disfrazados de documento. Además, el contenido
+// real se comprueba después (services/documentos.js › contenidoValido).
+const IMAGENES = {
   'image/jpeg': '.jpg',
   'image/png': '.png',
   'image/webp': '.webp',
 }
+const TIPOS_PERMITIDOS = { ...IMAGENES, 'application/pdf': '.pdf' }
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOADS_DIR),
@@ -19,24 +22,30 @@ const storage = multer.diskStorage({
   }
 })
 
-const fileFilter = (req, file, cb) => {
-  if (!TIPOS_PERMITIDOS[file.mimetype]) {
-    return cb(new Error('Solo se permiten imágenes JPG, PNG o WEBP'))
+const filtroPara = (campos) => (req, file, cb) => {
+  const regla = campos[file.fieldname]
+  if (!regla) return cb(new Error('Archivo no esperado'))
+  const permitidos = regla.pdf ? TIPOS_PERMITIDOS : IMAGENES
+  if (!permitidos[file.mimetype]) {
+    return cb(new Error(regla.pdf
+      ? 'Solo se permiten imágenes JPG, PNG o WEBP, o archivos PDF'
+      : 'Solo se permiten imágenes JPG, PNG o WEBP'))
   }
   cb(null, true)
 }
 
-const maxMB = Number(process.env.UPLOAD_MAX_SIZE_MB) || 5
+const maxMB = Number(process.env.UPLOAD_MAX_SIZE_MB) || 8
+const limits = { fileSize: maxMB * 1024 * 1024, files: 20 }
 
-const upload = multer({ storage, fileFilter, limits: { fileSize: maxMB * 1024 * 1024 } })
+// Foto suelta (uso general)
+const upload = multer({ storage, fileFilter: filtroPara({ foto: {} }), limits })
 
-// Los 5 documentos del registro de conductor
-const documentosConductor = upload.fields([
-  { name: 'foto_dni_frontal', maxCount: 1 },
-  { name: 'foto_dni_trasera', maxCount: 1 },
-  { name: 'foto_licencia',    maxCount: 1 },
-  { name: 'foto_vehiculo',    maxCount: 1 },
-  { name: 'foto_perfil',      maxCount: 1 },
-])
+// Todos los documentos del registro de conductor
+const documentosConductor = multer({ storage, fileFilter: filtroPara(ARCHIVOS), limits })
+  .fields(Object.keys(ARCHIVOS).map(name => ({ name, maxCount: 1 })))
 
-module.exports = { upload, documentosConductor }
+// Renovación de un documento (SOAT, licencia, revisión técnica…) por un conductor ya registrado
+const renovacionConductor = multer({ storage, fileFilter: filtroPara(ARCHIVOS_RENOVACION), limits })
+  .fields(Object.keys(ARCHIVOS_RENOVACION).map(name => ({ name, maxCount: 1 })))
+
+module.exports = { upload, documentosConductor, renovacionConductor, maxMB }
