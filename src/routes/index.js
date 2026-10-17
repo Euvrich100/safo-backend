@@ -12,6 +12,7 @@ const registroCtrl  = require('../controllers/registroController')
 const cuentaCtrl    = require('../controllers/cuentaController')
 const segCtrl       = require('../controllers/seguridadController')
 const platCtrl      = require('../controllers/plataformaController')
+const auxCtrl       = require('../controllers/auxilioController')
 const { auditar }   = require('../services/auditoria')
 const { documentosConductor, renovacionConductor } = require('../middlewares/upload')
 
@@ -109,6 +110,16 @@ router.put   ('/admin/reclamos/:id',     verificarToken, soloAdmin, auditar('rec
 router.get   ('/admin/sos',              verificarToken, soloAdmin, platCtrl.listarSOS)
 router.put   ('/admin/sos/:id/atender',  verificarToken, soloAdmin, auditar('sos.atender', 'sos'), platCtrl.atenderSOS)
 router.get   ('/admin/auditoria',        verificarToken, soloAdmin, platCtrl.listarAuditoria)
+
+// ══════════════════════════════════════════
+// AUXILIO MECÁNICO — solo conductores
+// ══════════════════════════════════════════
+router.post  ('/auxilio/acceso',          auxCtrl.acceso)
+router.get   ('/auxilio/mecanicos',       verificarToken, soloConductor, auxCtrl.listarParaConductor)
+router.get   ('/admin/mecanicos',         verificarToken, soloAdmin, auxCtrl.listarAdmin)
+router.post  ('/admin/mecanicos',         verificarToken, soloAdmin, auditar('mecanico.crear', 'mecanico'), auxCtrl.crear)
+router.put   ('/admin/mecanicos/:id',     verificarToken, soloAdmin, auditar('mecanico.actualizar', 'mecanico'), auxCtrl.actualizar)
+router.delete('/admin/mecanicos/:id',     verificarToken, soloAdmin, auditar('mecanico.eliminar', 'mecanico'), auxCtrl.eliminar)
 
 // ══════════════════════════════════════════
 // REGISTRO PÚBLICO (portal web)

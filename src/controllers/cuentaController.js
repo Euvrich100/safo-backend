@@ -31,6 +31,31 @@ const registrarFallo = (celular) => {
 // Hash falso para igualar el tiempo de respuesta cuando el celular no existe
 const HASH_FALSO = bcrypt.hashSync('safo-no-existe', 10)
 
+// Verifica celular + contraseña de un CONDUCTOR aprobado y no suspendido (sin crear sesión).
+// Comparte el bloqueo anti fuerza bruta con el login. Devuelve { usuario } o { status, error }.
+const verificarCredencialesConductor = async (celularCrudo, password) => {
+  const celular = soloDigitos(celularCrudo)
+  if (celular.length !== 9 || typeof password !== 'string' || !password) {
+    return { status: 400, error: 'Ingresa tu celular de 9 dígitos y tu contraseña' }
+  }
+  if (bloqueado(celular)) {
+    return { status: 429, error: 'Demasiados intentos fallidos. Espera 15 minutos.' }
+  }
+  const r = await query('SELECT id, nombre, celular, rol, estado, password_hash FROM usuarios WHERE celular = $1', [celular])
+  const u = r.rows[0]
+  const ok = await bcrypt.compare(password.slice(0, CLAVE_MAX), u && u.password_hash ? u.password_hash : HASH_FALSO)
+  if (!u || !u.password_hash || !ok) {
+    registrarFallo(celular)
+    return { status: 401, error: 'Celular o contraseña incorrectos' }
+  }
+  fallos.delete(celular)
+  if (u.estado === 'suspendido') return { status: 403, error: 'Cuenta suspendida. Contacta al administrador.' }
+  if (u.rol !== 'conductor') return { status: 403, error: 'El auxilio mecánico es solo para conductores de SafO.' }
+  const d = (await query('SELECT estado_doc FROM conductores WHERE usuario_id = $1', [u.id])).rows[0]
+  if (!d || d.estado_doc !== 'aprobado') return { status: 403, error: 'Tu cuenta de conductor aún no está aprobada.' }
+  return { usuario: { id: u.id, nombre: u.nombre } }
+}
+
 // POST /api/auth/login  { celular, password }
 const login = async (req, res) => {
   try {
@@ -170,4 +195,4 @@ const restablecerClave = async (req, res) => {
   }
 }
 
-module.exports = { login, cambiarClave, actualizarPerfilCuenta, restablecerClave, hashClave, claveValida, CLAVE_MIN, CLAVE_MAX }
+module.exports = { login, cambiarClave, actualizarPerfilCuenta, restablecerClave, hashClave, claveValida, CLAVE_MIN, CLAVE_MAX, verificarCredencialesConductor }
