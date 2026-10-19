@@ -2,6 +2,7 @@ const fs = require('fs')
 const path = require('path')
 const { query } = require('../config/database')
 const { UPLOADS_DIR } = require('../config/uploads')
+const almacen = require('./almacenamiento')
 
 // ═══════════════════════════════════════════════════════════════════════
 // Credenciales del conductor: qué se pide, cuándo vence y cómo se revisa.
@@ -220,8 +221,9 @@ const contenidoValido = (archivo) => {
   } catch { return false }
 }
 
+// Borra los archivos de una subida (de la carpeta de paso y, si ya se subieron, del almacenamiento permanente)
 const borrarArchivos = (files = {}) => {
-  Object.values(files).flat().forEach(f => fs.unlink(path.join(UPLOADS_DIR, f.filename), () => {}))
+  almacen.borrar(Object.values(files).flat().map(f => f.filename))
 }
 
 // ── Bloqueo automático ───────────────────────────────────────────────────

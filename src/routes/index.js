@@ -14,20 +14,21 @@ const segCtrl       = require('../controllers/seguridadController')
 const platCtrl      = require('../controllers/plataformaController')
 const auxCtrl       = require('../controllers/auxilioController')
 const { auditar }   = require('../services/auditoria')
+const limites       = require('../middlewares/limites')
 const { documentosConductor, renovacionConductor } = require('../middlewares/upload')
 
 // ══════════════════════════════════════════
 // AUTH — público, no requiere token
 // ══════════════════════════════════════════
-router.post('/auth/registrar',      authCtrl.registrar)
-router.post('/auth/solicitar-otp',  authCtrl.solicitarOTP)
-router.post('/auth/verificar-otp',  authCtrl.verificarOTP)
-router.post('/auth/login',          cuentaCtrl.login)
+router.post('/auth/registrar',      limites.registro, authCtrl.registrar)
+router.post('/auth/solicitar-otp',  limites.pedirSMS, authCtrl.solicitarOTP)
+router.post('/auth/verificar-otp',  limites.verificarSMS, authCtrl.verificarOTP)
+router.post('/auth/login',          limites.acceso, cuentaCtrl.login)
 router.get ('/auth/social/proveedores',       socialCtrl.proveedores)
-router.post('/auth/social',                   socialCtrl.loginSocial)
-router.post('/auth/social/completar',         socialCtrl.completarSocial)
-router.post('/auth/google',                    authCtrl.loginGoogle)
-router.post('/auth/google/completar-pasajero', authCtrl.completarGoogle)
+router.post('/auth/social',                   limites.acceso, socialCtrl.loginSocial)
+router.post('/auth/social/completar',         limites.registro, socialCtrl.completarSocial)
+router.post('/auth/google',                    limites.acceso, authCtrl.loginGoogle)
+router.post('/auth/google/completar-pasajero', limites.registro, authCtrl.completarGoogle)
 
 // ══════════════════════════════════════════
 // CONDUCTOR — requiere token de conductor
@@ -114,7 +115,7 @@ router.get   ('/admin/auditoria',        verificarToken, soloAdmin, platCtrl.lis
 // ══════════════════════════════════════════
 // AUXILIO MECÁNICO — solo conductores
 // ══════════════════════════════════════════
-router.post  ('/auxilio/acceso',          auxCtrl.acceso)
+router.post  ('/auxilio/acceso',          limites.acceso, auxCtrl.acceso)
 router.get   ('/auxilio/mecanicos',       verificarToken, soloConductor, auxCtrl.listarParaConductor)
 router.get   ('/admin/mecanicos',         verificarToken, soloAdmin, auxCtrl.listarAdmin)
 router.post  ('/admin/mecanicos',         verificarToken, soloAdmin, auditar('mecanico.crear', 'mecanico'), auxCtrl.crear)
@@ -124,7 +125,7 @@ router.delete('/admin/mecanicos/:id',     verificarToken, soloAdmin, auditar('me
 // ══════════════════════════════════════════
 // REGISTRO PÚBLICO (portal web)
 // ══════════════════════════════════════════
-router.post('/auth/registrar-conductor', documentosConductor, registroCtrl.registrarConductor)
-router.post('/auth/registrar-pasajero',  registroCtrl.registrarPasajero)
+router.post('/auth/registrar-conductor', limites.registro, documentosConductor, registroCtrl.registrarConductor)
+router.post('/auth/registrar-pasajero',  limites.registro, registroCtrl.registrarPasajero)
 
 module.exports = router

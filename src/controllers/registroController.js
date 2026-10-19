@@ -5,6 +5,7 @@ const {
   contenidoValido, borrarArchivos
 } = require('../services/documentos')
 const { hashClave, claveValida, CLAVE_MIN, CLAVE_MAX } = require('./cuentaController')
+const almacen = require('../services/almacenamiento')
 
 const soloDigitos = (v) => String(v || '').replace(/\D/g, '')
 const texto = (v, max) => String(v ?? '').trim().replace(/\s+/g, ' ').slice(0, max)
@@ -149,6 +150,9 @@ const registrarConductor = async (req, res) => {
     if (dup.rows[0].dni)      return rechazar(409, 'Este DNI ya tiene una solicitud registrada')
     if (dup.rows[0].placa)    return rechazar(409, 'Esta placa ya tiene una solicitud registrada')
     if (dup.rows[0].licencia) return rechazar(409, 'Esta licencia ya tiene una solicitud registrada')
+
+    // Los documentos pasan a almacenamiento permanente ANTES de guardar el registro
+    await almacen.subir(files)
 
     // Columnas de archivo ← nombre guardado por multer
     const cols = {}

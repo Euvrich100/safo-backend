@@ -1,7 +1,6 @@
 const path = require('path')
-const fs = require('fs')
 const { query, pool } = require('../config/database')
-const { UPLOADS_DIR } = require('../config/uploads')
+const almacen = require('../services/almacenamiento')
 const docs = require('../services/documentos')
 
 // Consulta pública del SOAT por placa (APESEG). El admin la abre para cotejar el documento.
@@ -159,16 +158,18 @@ const detalleConductor = async (req, res) => {
 // GET /api/admin/documentos/:archivo
 // Sirve una foto de documento SOLO a administradores (DNI y licencia son datos
 // personales: no deben ser públicos como una carpeta estática).
-const verDocumento = (req, res) => {
-  // basename evita path traversal ("../../.env")
-  const archivo = path.basename(req.params.archivo)
-  const ruta = path.join(UPLOADS_DIR, archivo)
-  if (!fs.existsSync(ruta)) {
-    return res.status(404).json({ error: 'Documento no encontrado' })
+const verDocumento = async (req, res) => {
+  try {
+    // leer() solo acepta los nombres que genera el servidor (evita path traversal: "../../.env")
+    const doc = await almacen.leer(req.params.archivo)
+    if (!doc) return res.status(404).json({ error: 'Documento no encontrado' })
+    res.set('Cache-Control', 'private, max-age=300')
+    res.set('X-Content-Type-Options', 'nosniff')
+    res.type(doc.tipo).send(doc.buffer)
+  } catch (error) {
+    console.error('Error verDocumento:', error)
+    res.status(500).json({ error: 'No se pudo leer el documento' })
   }
-  res.set('Cache-Control', 'private, max-age=300')
-  res.set('X-Content-Type-Options', 'nosniff')
-  res.sendFile(ruta)
 }
 
 // PUT /api/admin/conductores/:id/documentos

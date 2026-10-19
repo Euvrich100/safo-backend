@@ -16,7 +16,7 @@ const limpiar = (valor, profundidad = 0) => {
 }
 
 const ipDe = (req) =>
-  String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim().slice(0, 64)
+  String(req.ip || req.socket?.remoteAddress || '').slice(0, 64)
 
 // Registra una acción manualmente (cuando hace falta más detalle que el middleware)
 const registrarAuditoria = async (req, accion, entidad, entidadId, detalle) => {

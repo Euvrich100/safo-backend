@@ -1,7 +1,6 @@
 const path = require('path')
-const fs = require('fs')
 const { query } = require('../config/database')
-const { UPLOADS_DIR } = require('../config/uploads')
+const almacen = require('../services/almacenamiento')
 const docs = require('../services/documentos')
 
 // GET /api/conductores/perfil
@@ -349,8 +348,8 @@ const renovarDocumento = async (req, res) => {
 
     // Si ya había una renovación sin revisar, su archivo anterior se descarta
     const previa = c.renovaciones?.[tipo]
-    if (previa?.archivo) fs.unlink(path.join(UPLOADS_DIR, previa.archivo), () => {})
-    if (previa?.archivo_reverso) fs.unlink(path.join(UPLOADS_DIR, previa.archivo_reverso), () => {})
+    await almacen.subir(files)
+    almacen.borrar([previa?.archivo, previa?.archivo_reverso].filter(Boolean))
 
     const valor = { ...entrada, archivo: archivo.filename, estado: 'pendiente', subido_en: new Date().toISOString() }
     await query(
@@ -394,11 +393,11 @@ const fotoConductor = async (req, res) => {
       [req.params.id]
     )
     if (r.rows.length === 0) return res.status(404).json({ error: 'Sin foto' })
-    const ruta = path.join(UPLOADS_DIR, path.basename(r.rows[0].perfil_foto_url))
-    if (!fs.existsSync(ruta)) return res.status(404).json({ error: 'Sin foto' })
+    const foto = await almacen.leer(r.rows[0].perfil_foto_url)
+    if (!foto) return res.status(404).json({ error: 'Sin foto' })
     res.set('Cache-Control', 'private, max-age=300')
     res.set('X-Content-Type-Options', 'nosniff')
-    res.sendFile(ruta)
+    res.type(foto.tipo).send(foto.buffer)
   } catch (error) {
     if (error.code === '22P02') return res.status(404).json({ error: 'Sin foto' })
     console.error('Error fotoConductor:', error)
